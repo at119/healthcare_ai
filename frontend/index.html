@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Healthcare AI Assistant</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🏥 Healthcare AI Assistant</h1>
+            <p class="subtitle">AI-powered health diary summarizer and clinical note cleaner</p>
+        </header>
+
+        <nav class="tabs">
+            <button class="tab-button active" data-tab="diary">Health Diary</button>
+            <button class="tab-button" data-tab="clinical">Clinical Notes</button>
+        </nav>
+
+        <!-- Health Diary Tab -->
+        <div id="diary-tab" class="tab-content active">
+            <div class="diary-container">
+                <div class="diary-input-section">
+                    <h2>Log Your Health Entry</h2>
+                    <form id="diary-form">
+                        <div class="form-group">
+                            <label for="entry-type">Entry Type:</label>
+                            <select id="entry-type" required>
+                                <option value="symptom">Symptom</option>
+                                <option value="food">Food</option>
+                                <option value="mood">Mood</option>
+                                <option value="general">General</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="diary-text">Text Entry:</label>
+                            <textarea id="diary-text" rows="4" placeholder="Type your entry here..."></textarea>
+                        </div>
+
+                        <div class="form-group">
+                            <label>Or Record Audio:</label>
+                            <div class="audio-controls">
+                                <button type="button" id="record-btn" class="btn btn-primary">
+                                    🎤 Start Recording
+                                </button>
+                                <button type="button" id="stop-btn" class="btn btn-secondary" disabled>
+                                    ⏹ Stop Recording
+                                </button>
+                                <span id="recording-status"></span>
+                            </div>
+                            <audio id="audio-playback" controls style="display: none; margin-top: 10px;"></audio>
+                        </div>
+
+                        <button type="submit" class="btn btn-success">Submit Entry</button>
+                    </form>
+                </div>
+
+                <div class="diary-entries-section">
+                    <h2>Your Entries</h2>
+                    <div id="entries-list"></div>
+                </div>
+
+                <div class="diary-summary-section">
+                    <h2>Health Summary & Trends</h2>
+                    <button id="refresh-summary" class="btn btn-info">Refresh Summary</button>
+                    <div id="summary-content">
+                        <div id="summary-stats"></div>
+                        <div id="summary-charts"></div>
+                        <div id="summary-suggestions"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Clinical Notes Tab -->
+        <div id="clinical-tab" class="tab-content">
+            <div class="clinical-container">
+                <div class="clinical-input-section">
+                    <h2>Clinical Note Transcription</h2>
+                    <p class="info-text">Record or upload a voice note to generate structured SOAP format documentation.</p>
+                    
+                    <form id="clinical-form">
+                        <div class="form-group">
+                            <label>Record Clinical Dictation:</label>
+                            <div class="audio-controls">
+                                <button type="button" id="clinical-record-btn" class="btn btn-primary">
+                                    🎤 Start Recording
+                                </button>
+                                <button type="button" id="clinical-stop-btn" class="btn btn-secondary" disabled>
+                                    ⏹ Stop Recording
+                                </button>
+                                <span id="clinical-recording-status"></span>
+                            </div>
+                            <audio id="clinical-audio-playback" controls style="display: none; margin-top: 10px;"></audio>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="clinical-text">Or Enter Text Dictation:</label>
+                            <textarea id="clinical-text" rows="6" placeholder="Enter clinical dictation text here..."></textarea>
+                        </div>
+
+                        <button type="submit" class="btn btn-success">Generate SOAP Note</button>
+                    </form>
+                </div>
+
+                <div class="clinical-results-section">
+                    <h2>Results</h2>
+                    <div id="clinical-results">
+                        <div class="placeholder-text">Submit a voice note or text to see results</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="loading-overlay" class="loading-overlay" style="display: none;">
+            <div class="spinner"></div>
+            <p>Processing...</p>
+        </div>
+
+        <div id="notification" class="notification"></div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
