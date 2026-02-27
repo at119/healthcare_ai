@@ -1,9 +1,3 @@
-# Environment variables
-.env
-*.env
-backend/.env
-backend/azure.env
-
 # Python
 __pycache__/
 *.py[cod]
