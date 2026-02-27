@@ -1,11 +1,9 @@
-"""Pydantic schemas for request/response models."""
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 
 class DiaryEntryRequest(BaseModel):
-    """Request schema for health diary entry."""
     text: Optional[str] = Field(None, description="Text entry")
     audio_data: Optional[str] = Field(None, description="Base64 encoded audio data")
     entry_type: str = Field(..., description="Type: 'symptom', 'food', 'mood', or 'general'")
@@ -13,7 +11,6 @@ class DiaryEntryRequest(BaseModel):
 
 
 class DiaryEntryResponse(BaseModel):
-    """Response schema for diary entry."""
     id: str
     text: str
     entry_type: str
@@ -24,7 +21,6 @@ class DiaryEntryResponse(BaseModel):
 
 
 class DiarySummaryResponse(BaseModel):
-    """Response schema for diary summary."""
     total_entries: int
     date_range: Dict[str, str]
     sentiment_trend: List[Dict[str, Any]]
@@ -35,13 +31,11 @@ class DiarySummaryResponse(BaseModel):
 
 
 class ClinicalNoteRequest(BaseModel):
-    """Request schema for clinical note transcription."""
     audio_data: str = Field(..., description="Base64 encoded audio data")
     language: str = Field("en-US", description="Speech language code")
 
 
 class SOAPNote(BaseModel):
-    """SOAP format structured note."""
     subjective: str = Field(..., description="Patient's subjective description")
     objective: str = Field(..., description="Objective observations and findings")
     assessment: str = Field(..., description="Clinical assessment and diagnosis")
@@ -49,7 +43,6 @@ class SOAPNote(BaseModel):
 
 
 class ClinicalNoteResponse(BaseModel):
-    """Response schema for clinical note."""
     transcription: str
     soap_note: SOAPNote
     health_entities: List[Dict[str, Any]]
@@ -57,7 +50,6 @@ class ClinicalNoteResponse(BaseModel):
 
 
 class HealthEntity(BaseModel):
-    """Health entity extracted from text."""
     text: str
     category: str
     confidence: float
@@ -66,6 +58,5 @@ class HealthEntity(BaseModel):
 
 
 class ErrorResponse(BaseModel):
-    """Error response schema."""
     error: str
     detail: Optional[str] = None

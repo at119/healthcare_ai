@@ -1,4 +1,3 @@
-"""Azure service clients for Speech, OpenAI, and Text Analytics."""
 import os
 from typing import Optional
 import azure.cognitiveservices.speech as speechsdk
@@ -9,41 +8,33 @@ from openai import AzureOpenAI
 
 
 class AzureClients:
-    """Manages Azure service clients."""
     
     def __init__(self):
-        # Azure Speech Service
         self.speech_key = os.getenv("AZURE_SPEECH_KEY")
         self.speech_region = os.getenv("AZURE_SPEECH_REGION", "eastus")
         
-        # Debug: Check if keys are loaded (only log if missing)
         if not self.speech_key:
             print("WARNING: AZURE_SPEECH_KEY not found in environment variables")
         
-        # Azure OpenAI
         self.openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
         self.openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
         self.openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
         self.openai_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4")
         
-        # Debug: Check if OpenAI keys are loaded
         if not self.openai_api_key:
             print("WARNING: AZURE_OPENAI_API_KEY not found in environment variables")
         if not self.openai_endpoint:
             print("WARNING: AZURE_OPENAI_ENDPOINT not found in environment variables")
         
-        # Text Analytics for Health
         self.text_analytics_endpoint = os.getenv("AZURE_TEXT_ANALYTICS_ENDPOINT")
         self.text_analytics_key = os.getenv("AZURE_TEXT_ANALYTICS_KEY")
         
-        # Initialize clients
         self._speech_config = None
         self._openai_client = None
         self._text_analytics_client = None
     
     @property
     def speech_config(self) -> Optional[speechsdk.SpeechConfig]:
-        """Get Azure Speech configuration."""
         try:
             if not self._speech_config and self.speech_key:
                 self._speech_config = speechsdk.SpeechConfig(
@@ -57,7 +48,6 @@ class AzureClients:
     
     @property
     def openai_client(self) -> Optional[AzureOpenAI]:
-        """Get Azure OpenAI client."""
         try:
             if not self._openai_client and self.openai_endpoint and self.openai_api_key:
                 self._openai_client = AzureOpenAI(
@@ -72,7 +62,6 @@ class AzureClients:
     
     @property
     def text_analytics_client(self) -> Optional[TextAnalyticsClient]:
-        """Get Text Analytics client."""
         if not self._text_analytics_client and self.text_analytics_endpoint and self.text_analytics_key:
             credential = AzureKeyCredential(self.text_analytics_key)
             self._text_analytics_client = TextAnalyticsClient(
@@ -82,17 +71,15 @@ class AzureClients:
         return self._text_analytics_client
     
     def transcribe_audio(self, audio_data: bytes, language: str = "en-US") -> str:
-        """Transcribe audio to text using Azure Speech-to-Text."""
         if not self.speech_config:
             raise ValueError("Azure Speech service not configured")
         
-        if len(audio_data) < 1000:  # Very small audio file
+        if len(audio_data) < 1000:
             raise ValueError("Audio file is too short. Please record at least 1-2 seconds of audio.")
         
         import io
         import wave
         
-        # Try to read WAV file to get actual format
         sample_rate = 16000
         channels = 1
         bits_per_sample = 16
@@ -106,15 +93,12 @@ class AzureClients:
                 frames = wav_file.getnframes()
                 print(f"WAV file detected: {sample_rate}Hz, {channels} channel(s), {bits_per_sample}bit, {frames} frames")
                 
-                # Read the actual audio data
                 audio_io.seek(0)
                 audio_data = audio_io.read()
         except Exception as e:
             print(f"Not a standard WAV file or error reading: {e}")
-            # Assume it's raw PCM or try to process anyway
             pass
         
-        # Create audio stream format matching the actual audio
         try:
             stream_format = speechsdk.audio.AudioStreamFormat(
                 samples_per_second=sample_rate,
@@ -123,36 +107,27 @@ class AzureClients:
             )
         except Exception as e:
             print(f"Error creating stream format: {e}, using defaults")
-            # Fallback to default format
             stream_format = speechsdk.audio.AudioStreamFormat(
                 samples_per_second=16000,
                 bits_per_sample=16,
                 channels=1
             )
         
-        # Create push stream
         push_stream = speechsdk.audio.PushAudioInputStream(stream_format=stream_format)
         
-        # For WAV files, we need to extract just the PCM data (skip header)
-        # But only if we detected it's a WAV file
         pcm_data = audio_data
         if audio_data[:4] == b'RIFF' and audio_data[8:12] == b'WAVE':
             try:
-                # Parse WAV file to extract PCM data
                 audio_io = io.BytesIO(audio_data)
                 with wave.open(audio_io, 'rb') as wav_file:
-                    # Read all frames (this gives us the raw PCM data)
                     pcm_data = wav_file.readframes(wav_file.getnframes())
                     print(f"Extracted {len(pcm_data)} bytes of PCM data from WAV file")
             except Exception as e:
                 print(f"Error extracting PCM from WAV: {e}, using raw data")
-                # If we can't parse it, try using the whole file
                 pcm_data = audio_data
         else:
-            # Not a WAV file, use as-is (might be raw PCM)
             pcm_data = audio_data
         
-        # Write audio data in chunks
         chunk_size = 4096
         audio_io = io.BytesIO(pcm_data)
         bytes_written = 0
@@ -166,17 +141,14 @@ class AzureClients:
         print(f"Wrote {bytes_written} bytes to audio stream")
         push_stream.close()
         
-        # Create audio config
         audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
         
-        # Create recognizer
         recognizer = speechsdk.SpeechRecognizer(
             speech_config=self.speech_config,
             audio_config=audio_config,
             language=language
         )
         
-        # Perform recognition
         print("Starting speech recognition...")
         result = recognizer.recognize_once_async().get()
         print(f"Recognition result reason: {result.reason}")
@@ -208,7 +180,6 @@ class AzureClients:
             raise ValueError(f"Speech recognition failed with reason: {result.reason}")
     
     def extract_health_entities(self, text: str) -> dict:
-        """Extract health-related entities using Text Analytics for Health."""
         if not self.text_analytics_client:
             raise ValueError("Text Analytics service not configured")
         

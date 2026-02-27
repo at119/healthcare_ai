@@ -1,29 +1,21 @@
-// API Configuration
 const API_BASE_URL = 'http://localhost:8000';
 
-// Global state
 let mediaRecorder = null;
 let audioChunks = [];
-let currentRecordingType = null; // 'diary' or 'clinical'
+let currentRecordingType = null;
 
-// Tab switching
 document.querySelectorAll('.tab-button').forEach(button => {
     button.addEventListener('click', () => {
         const tabName = button.dataset.tab;
         
-        // Update buttons
         document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
         button.classList.add('active');
         
-        // Update content
         document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
         document.getElementById(`${tabName}-tab`).classList.add('active');
     });
 });
 
-// ==================== Health Diary Functions ====================
-
-// Diary form submission
 document.getElementById('diary-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     
@@ -58,12 +50,10 @@ document.getElementById('diary-form').addEventListener('submit', async (e) => {
         const entry = await response.json();
         showNotification('Entry created successfully!', 'success');
         
-        // Clear form
         document.getElementById('diary-text').value = '';
         audioChunks = [];
         document.getElementById('audio-playback').style.display = 'none';
         
-        // Refresh entries and summary
         loadDiaryEntries();
         loadDiarySummary();
     } catch (error) {
@@ -73,7 +63,6 @@ document.getElementById('diary-form').addEventListener('submit', async (e) => {
     }
 });
 
-// Load diary entries
 async function loadDiaryEntries() {
     try {
         const response = await fetch(`${API_BASE_URL}/api/diary/entries`);
@@ -107,13 +96,11 @@ async function loadDiaryEntries() {
     }
 }
 
-// Load diary summary
 async function loadDiarySummary() {
     try {
         const response = await fetch(`${API_BASE_URL}/api/diary/summary`);
         const summary = await response.json();
         
-        // Display stats
         const statsHtml = `
             <div class="summary-stats-grid">
                 <div class="stat-card">
@@ -132,14 +119,12 @@ async function loadDiarySummary() {
         `;
         document.getElementById('summary-stats').innerHTML = statsHtml;
         
-        // Display charts
         const chartsHtml = `
             <div id="sentiment-chart" style="margin: 20px 0;"></div>
             <div id="symptoms-chart" style="margin: 20px 0;"></div>
         `;
         document.getElementById('summary-charts').innerHTML = chartsHtml;
         
-        // Sentiment chart
         if (summary.sentiment_trend && summary.sentiment_trend.length > 0) {
             const sentimentData = summary.sentiment_trend.map(s => ({
                 x: [s.sentiment],
@@ -156,7 +141,6 @@ async function loadDiarySummary() {
             });
         }
         
-        // Symptoms chart
         if (summary.common_symptoms && summary.common_symptoms.length > 0) {
             const symptomsData = [{
                 x: summary.common_symptoms.map(s => s.symptom),
@@ -172,7 +156,6 @@ async function loadDiarySummary() {
             });
         }
         
-        // Display suggestions
         if (summary.suggestions && summary.suggestions.length > 0) {
             const suggestionsHtml = `
                 <div class="suggestions-box">
@@ -187,7 +170,6 @@ async function loadDiarySummary() {
     }
 }
 
-// Delete entry
 async function deleteEntry(entryId) {
     if (!confirm('Are you sure you want to delete this entry?')) return;
     
@@ -206,14 +188,10 @@ async function deleteEntry(entryId) {
     }
 }
 
-// Refresh summary button
 document.getElementById('refresh-summary').addEventListener('click', () => {
     loadDiarySummary();
 });
 
-// ==================== Clinical Notes Functions ====================
-
-// Clinical form submission
 document.getElementById('clinical-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     
@@ -233,7 +211,6 @@ document.getElementById('clinical-form').addEventListener('submit', async (e) =>
             formData.append('audio_data', audioData);
             formData.append('language', 'en-US');
         } else {
-            // Use text-to-SOAP endpoint
             formData.append('text', text);
         }
         
@@ -255,7 +232,6 @@ document.getElementById('clinical-form').addEventListener('submit', async (e) =>
         displayClinicalResults(result);
         showNotification('SOAP note generated successfully!', 'success');
         
-        // Clear form
         document.getElementById('clinical-text').value = '';
         audioChunks = [];
         document.getElementById('clinical-audio-playback').style.display = 'none';
@@ -266,7 +242,6 @@ document.getElementById('clinical-form').addEventListener('submit', async (e) =>
     }
 });
 
-// Display clinical results
 function displayClinicalResults(result) {
     const resultsDiv = document.getElementById('clinical-results');
     
@@ -323,13 +298,9 @@ function displayClinicalResults(result) {
     resultsDiv.innerHTML = html;
 }
 
-// ==================== Audio Recording Functions ====================
-
-// Diary recording
 document.getElementById('record-btn').addEventListener('click', startRecording.bind(null, 'diary'));
 document.getElementById('stop-btn').addEventListener('click', stopRecording);
 
-// Clinical recording
 document.getElementById('clinical-record-btn').addEventListener('click', startRecording.bind(null, 'clinical'));
 document.getElementById('clinical-stop-btn').addEventListener('click', stopRecording);
 
@@ -347,7 +318,6 @@ async function startRecording(type) {
             }
         });
         
-        // Try to use WAV format if available, otherwise use default
         let options = {};
         if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
             options = { mimeType: 'audio/webm;codecs=opus' };
@@ -364,7 +334,6 @@ async function startRecording(type) {
         };
         
         mediaRecorder.onstop = async () => {
-            // Get the actual MIME type from the recorder
             const mimeType = mediaRecorder.mimeType || 'audio/webm';
             const audioBlob = new Blob(audioChunks, { type: mimeType });
             const audioUrl = URL.createObjectURL(audioBlob);
@@ -409,11 +378,9 @@ function stopRecording() {
 async function getAudioBase64() {
     if (audioChunks.length === 0) return null;
     
-    // Get the actual recorded format
     const mimeType = mediaRecorder ? mediaRecorder.mimeType : 'audio/webm';
     const audioBlob = new Blob(audioChunks, { type: mimeType });
     
-    // Convert WebM/Opus to WAV format for Azure Speech
     try {
         const wavBlob = await convertToWav(audioBlob);
         return new Promise((resolve) => {
@@ -426,7 +393,6 @@ async function getAudioBase64() {
         });
     } catch (error) {
         console.error('Error converting audio:', error);
-        // Fallback: send as-is (might not work but worth trying)
         return new Promise((resolve) => {
             const reader = new FileReader();
             reader.onloadend = () => {
@@ -439,18 +405,16 @@ async function getAudioBase64() {
 }
 
 async function convertToWav(audioBlob) {
-    // Use AudioContext to convert to WAV
     try {
         const arrayBuffer = await audioBlob.arrayBuffer();
         const audioContext = new (window.AudioContext || window.webkitAudioContext)({
-            sampleRate: 16000  // Force 16kHz sample rate
+            sampleRate: 16000
         });
         
         console.log('Decoding audio data...');
         const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
         console.log(`Audio decoded: ${audioBuffer.sampleRate}Hz, ${audioBuffer.numberOfChannels} channels, ${audioBuffer.length} samples`);
         
-        // Convert to WAV format
         const wav = audioBufferToWav(audioBuffer);
         console.log(`WAV created: ${wav.byteLength} bytes`);
         return new Blob([wav], { type: 'audio/wav' });
@@ -473,7 +437,6 @@ function audioBufferToWav(buffer) {
     const arrayBuffer = new ArrayBuffer(bufferSize);
     const view = new DataView(arrayBuffer);
     
-    // WAV header
     const writeString = (offset, string) => {
         for (let i = 0; i < string.length; i++) {
             view.setUint8(offset + i, string.charCodeAt(i));
@@ -484,17 +447,16 @@ function audioBufferToWav(buffer) {
     view.setUint32(4, bufferSize - 8, true);
     writeString(8, 'WAVE');
     writeString(12, 'fmt ');
-    view.setUint32(16, 16, true); // fmt chunk size
-    view.setUint16(20, 1, true); // audio format (PCM)
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
     view.setUint16(22, numberOfChannels, true);
     view.setUint32(24, sampleRate, true);
     view.setUint32(28, byteRate, true);
     view.setUint16(32, blockAlign, true);
-    view.setUint16(34, 16, true); // bits per sample
+    view.setUint16(34, 16, true);
     writeString(36, 'data');
     view.setUint32(40, dataSize, true);
     
-    // Convert float samples to 16-bit PCM
     let offset = 44;
     for (let i = 0; i < length; i++) {
         for (let channel = 0; channel < numberOfChannels; channel++) {
@@ -506,8 +468,6 @@ function audioBufferToWav(buffer) {
     
     return arrayBuffer;
 }
-
-// ==================== Utility Functions ====================
 
 function showLoading(show) {
     document.getElementById('loading-overlay').style.display = show ? 'flex' : 'none';
@@ -523,7 +483,6 @@ function showNotification(message, type = 'info') {
     }, 3000);
 }
 
-// Initialize on load
 document.addEventListener('DOMContentLoaded', () => {
     loadDiaryEntries();
     loadDiarySummary();

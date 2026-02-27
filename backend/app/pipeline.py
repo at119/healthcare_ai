@@ -1,17 +1,14 @@
-"""Processing pipelines for diary summarization and SOAP note generation."""
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 from .azure_clients import AzureClients
 
 
 class DiaryPipeline:
-    """Pipeline for processing health diary entries."""
     
     def __init__(self, azure_clients: AzureClients):
         self.azure_clients = azure_clients
     
     def analyze_sentiment(self, text: str) -> str:
-        """Analyze sentiment of diary entry."""
         if not self.azure_clients.openai_client:
             return "neutral"
         
@@ -33,7 +30,6 @@ class DiaryPipeline:
             return "neutral"
     
     def generate_summary(self, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Generate summary from multiple diary entries."""
         if not entries:
             return {
                 "total_entries": 0,
@@ -45,17 +41,14 @@ class DiaryPipeline:
                 "visualization_data": {}
             }
         
-        # Extract dates and sentiments
         dates = [entry.get("timestamp", datetime.now()) for entry in entries]
         sentiments = [entry.get("sentiment", "neutral") for entry in entries]
         
-        # Count symptoms and moods
         symptoms = {}
         moods = {}
         for entry in entries:
             if entry.get("entry_type") == "symptom":
                 text = entry.get("text", "").lower()
-                # Simple keyword extraction
                 common_symptoms = ["headache", "pain", "fever", "nausea", "fatigue", "cough", "sore throat"]
                 for symptom in common_symptoms:
                     if symptom in text:
@@ -70,15 +63,12 @@ class DiaryPipeline:
                 else:
                     moods["neutral"] = moods.get("neutral", 0) + 1
         
-        # Generate suggestions using AI
         suggestions = self._generate_suggestions(entries)
         
-        # Prepare visualization data
         sentiment_counts = {"positive": 0, "negative": 0, "neutral": 0}
         for sentiment in sentiments:
             sentiment_counts[sentiment] = sentiment_counts.get(sentiment, 0) + 1
         
-        # Time series data for visualization
         time_series = []
         for i, entry in enumerate(entries):
             time_series.append({
@@ -110,12 +100,10 @@ class DiaryPipeline:
         }
     
     def _generate_suggestions(self, entries: List[Dict[str, Any]]) -> List[str]:
-        """Generate AI-powered suggestions based on diary entries."""
         if not self.azure_clients.openai_client or not entries:
             return []
         
         try:
-            # Get recent entries
             recent_entries = entries[-10:] if len(entries) > 10 else entries
             entries_text = "\n".join([
                 f"{entry.get('entry_type', 'general')}: {entry.get('text', '')}"
@@ -133,27 +121,23 @@ class DiaryPipeline:
             )
             
             suggestions_text = response.choices[0].message.content.strip()
-            # Parse suggestions (split by newlines or bullets)
             suggestions = [
                 s.strip().lstrip("- ").lstrip("* ")
                 for s in suggestions_text.split("\n")
                 if s.strip()
             ]
-            return suggestions[:3]  # Limit to 3 suggestions
+            return suggestions[:3]
         except:
             return ["Consider maintaining regular sleep patterns", "Stay hydrated throughout the day"]
 
 
 class SOAPPipeline:
-    """Pipeline for generating SOAP notes from clinical dictation."""
     
     def __init__(self, azure_clients: AzureClients):
         self.azure_clients = azure_clients
     
     def generate_soap_note(self, transcription: str, health_entities: Optional[Dict] = None) -> Dict[str, str]:
-        """Generate structured SOAP note from transcription."""
         if not self.azure_clients.openai_client:
-            # Fallback: simple parsing
             return {
                 "subjective": transcription,
                 "objective": "No objective findings recorded.",
@@ -162,7 +146,6 @@ class SOAPPipeline:
             }
         
         try:
-            # Build context with health entities if available
             context = transcription
             if health_entities and health_entities.get("entities"):
                 entities_text = ", ".join([
@@ -191,11 +174,9 @@ Be precise, professional, and maintain medical accuracy. If information is missi
             
             soap_text = response.choices[0].message.content.strip()
             
-            # Parse SOAP sections
             soap_note = self._parse_soap_response(soap_text)
             return soap_note
         except Exception as e:
-            # Fallback
             return {
                 "subjective": transcription,
                 "objective": "Objective findings to be documented.",
@@ -204,7 +185,6 @@ Be precise, professional, and maintain medical accuracy. If information is missi
             }
     
     def _parse_soap_response(self, soap_text: str) -> Dict[str, str]:
-        """Parse AI response into SOAP sections."""
         sections = {
             "subjective": "",
             "objective": "",
@@ -212,10 +192,8 @@ Be precise, professional, and maintain medical accuracy. If information is missi
             "plan": ""
         }
         
-        # Try to extract sections by headers
         text_lower = soap_text.lower()
         
-        # Find section boundaries
         section_keywords = {
             "subjective": ["subjective", "s:", "chief complaint", "history of present illness"],
             "objective": ["objective", "o:", "physical examination", "vital signs", "exam"],
@@ -229,11 +207,9 @@ Be precise, professional, and maintain medical accuracy. If information is missi
         for line in lines:
             line_lower = line.lower().strip()
             
-            # Check if this line starts a new section
             for section, keywords in section_keywords.items():
                 if any(line_lower.startswith(kw) or kw in line_lower[:20] for kw in keywords):
                     current_section = section
-                    # Remove the header from the line
                     for kw in keywords:
                         if kw in line_lower:
                             line = line[line_lower.find(kw) + len(kw):].strip().lstrip(":").strip()
@@ -245,9 +221,7 @@ Be precise, professional, and maintain medical accuracy. If information is missi
                     sections[current_section] += " "
                 sections[current_section] += line.strip()
         
-        # If parsing failed, distribute content
         if not any(sections.values()):
-            # Simple fallback: split by paragraphs
             paragraphs = [p.strip() for p in soap_text.split("\n\n") if p.strip()]
             if len(paragraphs) >= 4:
                 sections["subjective"] = paragraphs[0]
@@ -257,7 +231,6 @@ Be precise, professional, and maintain medical accuracy. If information is missi
             else:
                 sections["subjective"] = soap_text
         
-        # Ensure all sections have content
         for section in sections:
             if not sections[section]:
                 sections[section] = f"{section.capitalize()} information to be documented."
