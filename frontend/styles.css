@@ -494,16 +494,6 @@ header h1 {
     font-size: 13px;
 }
 
-.confidence-badge {
-    display: inline-block;
-    background: #34c759;
-    color: white;
-    padding: 8px 16px;
-    border-radius: 20px;
-    font-weight: 600;
-    font-size: 14px;
-}
-
 .placeholder-text {
     text-align: center;
     color: #86868b;

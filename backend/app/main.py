@@ -20,14 +20,14 @@ try:
     backend_dir = pathlib.Path(__file__).parent.parent
     env_path = backend_dir / ".env"
     if env_path.exists():
-        load_dotenv(env_path)
-        print(f"Loaded .env from: {env_path}")
+        load_dotenv(env_path, override=True)
+        print(f"Loaded .env from: {env_path} (override=True)")
     else:
-        load_dotenv()
-        print("Loaded .env from current directory")
+        load_dotenv(override=True)
+        print("Loaded .env from current directory (override=True)")
 except Exception as e:
     print(f"Warning: Error loading .env file: {e}")
-    load_dotenv()
+    load_dotenv(override=True)
 
 from starlette.requests import Request
 from starlette.datastructures import UploadFile as StarletteUploadFile
@@ -88,9 +88,17 @@ async def health_check():
             print(f"Speech service check failed: {e}")
         
         try:
-            openai_available = azure_clients.openai_client is not None
+            client = azure_clients.openai_client
+            openai_available = client is not None
+            if not openai_available:
+                print("OpenAI client is None - checking environment variables...")
+                print(f"  Endpoint set: {bool(azure_clients.openai_endpoint)}")
+                print(f"  API key set: {bool(azure_clients.openai_api_key)}")
         except Exception as e:
             print(f"OpenAI service check failed: {e}")
+            import traceback
+            traceback.print_exc()
+            openai_available = False
         
         try:
             text_analytics_available = azure_clients.text_analytics_client is not None
@@ -245,13 +253,10 @@ async def transcribe_clinical_note(
         soap_note_dict = soap_pipeline.generate_soap_note(transcription, health_entities)
         soap_note = SOAPNote(**soap_note_dict)
         
-        confidence = 0.85
-        
         return ClinicalNoteResponse(
             transcription=transcription,
             soap_note=soap_note,
-            health_entities=health_entities.get("entities", []),
-            confidence_score=confidence
+            health_entities=health_entities.get("entities", [])
         )
     except HTTPException:
         raise
@@ -259,9 +264,119 @@ async def transcribe_clinical_note(
         raise HTTPException(status_code=500, detail=f"Error processing clinical note: {str(e)}")
 
 
+@app.get("/test-openai")
+async def test_openai():
+    import sys
+    import logging
+    from openai import AzureOpenAI
+    
+    sys.stdout.flush()
+    print("\n" + "="*50, flush=True)
+    print("=== TESTING OPENAI CLIENT ===", flush=True)
+    print("="*50, flush=True)
+    sys.stdout.flush()
+    
+    try:
+        endpoint = getattr(azure_clients, 'openai_endpoint', None)
+        api_key = getattr(azure_clients, 'openai_api_key', None)
+        deployment = getattr(azure_clients, 'openai_deployment', None)
+        api_version = getattr(azure_clients, 'openai_api_version', None)
+        
+        debug_info = {
+            "endpoint": endpoint,
+            "api_key_present": bool(api_key),
+            "api_key_length": len(api_key) if api_key else 0,
+            "deployment": deployment,
+            "api_version": api_version
+        }
+        
+        print(f"Endpoint: {endpoint}")
+        print(f"API Key present: {bool(api_key)}")
+        if api_key:
+            print(f"API Key length: {len(api_key)}")
+        print(f"Deployment: {deployment}")
+        print(f"API Version: {api_version}")
+        
+        if not endpoint:
+            return {
+                "status": "error",
+                "message": "AZURE_OPENAI_ENDPOINT is not set",
+                "debug": debug_info
+            }
+        
+        if not api_key:
+            return {
+                "status": "error",
+                "message": "AZURE_OPENAI_API_KEY is not set",
+                "debug": debug_info
+            }
+        
+        print("Attempting direct initialization...")
+        endpoint_clean = endpoint.rstrip('/')
+        
+        try:
+            test_client = AzureOpenAI(
+                api_version=api_version,
+                azure_endpoint=endpoint_clean,
+                api_key=api_key
+            )
+            print("Direct initialization successful!")
+            
+            print("Making test API call...")
+            response = test_client.chat.completions.create(
+                model=deployment,
+                messages=[{"role": "user", "content": "Say hello"}],
+                max_tokens=10
+            )
+            
+            return {
+                "status": "success",
+                "message": "OpenAI is working!",
+                "test_response": response.choices[0].message.content,
+                "debug": debug_info
+            }
+        except Exception as init_error:
+            error_msg = str(init_error)
+            error_type = type(init_error).__name__
+            print(f"Initialization failed: {error_type}: {error_msg}")
+            import traceback
+            tb = traceback.format_exc()
+            print(tb)
+            
+            return {
+                "status": "error",
+                "message": f"Failed to initialize OpenAI client: {error_msg}",
+                "error_type": error_type,
+                "traceback": tb,
+                "debug": debug_info
+            }
+        
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"ERROR in test_openai: {error_detail}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": str(e),
+                "traceback": error_detail
+            }
+        )
+
+
 @app.post("/api/clinical/text-to-soap", response_model=ClinicalNoteResponse)
 async def text_to_soap(text: str = Form(...)):
     try:
+        print(f"\n=== SOAP Generation Request ===")
+        print(f"OpenAI client check: {azure_clients.openai_client is not None}")
+        if not azure_clients.openai_client:
+            print("WARNING: OpenAI client is None - will use fallback")
+            print(f"Endpoint: {azure_clients.openai_endpoint}")
+            print(f"API Key set: {bool(azure_clients.openai_api_key)}")
+            print(f"Deployment: {azure_clients.openai_deployment}")
+            print(f"API Version: {azure_clients.openai_api_version}")
+        
         health_entities = {"entities": [], "relations": []}
         try:
             health_entities = azure_clients.extract_health_entities(text)
@@ -274,10 +389,12 @@ async def text_to_soap(text: str = Form(...)):
         return ClinicalNoteResponse(
             transcription=text,
             soap_note=soap_note,
-            health_entities=health_entities.get("entities", []),
-            confidence_score=1.0
+            health_entities=health_entities.get("entities", [])
         )
     except Exception as e:
+        print(f"ERROR in text_to_soap: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error generating SOAP note: {str(e)}")
 
 

@@ -46,7 +46,6 @@ class ClinicalNoteResponse(BaseModel):
     transcription: str
     soap_note: SOAPNote
     health_entities: List[Dict[str, Any]]
-    confidence_score: float
 
 
 class HealthEntity(BaseModel):

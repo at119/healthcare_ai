@@ -289,9 +289,6 @@ function displayClinicalResults(result) {
                 </div>
             ` : ''}
             
-            <div class="soap-section">
-                <div class="confidence-badge">Confidence: ${(result.confidence_score * 100).toFixed(1)}%</div>
-            </div>
         </div>
     `;
     

@@ -16,10 +16,30 @@ class AzureClients:
         if not self.speech_key:
             print("WARNING: AZURE_SPEECH_KEY not found in environment variables")
         
-        self.openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        endpoint_raw = os.getenv("AZURE_OPENAI_ENDPOINT")
         self.openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
-        self.openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
-        self.openai_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4")
+        self.openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
+        self.openai_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+        
+        if endpoint_raw:
+            if '/openai/deployments' in endpoint_raw:
+                print("WARNING: AZURE_OPENAI_ENDPOINT contains full API path. Extracting base endpoint...")
+                from urllib.parse import urlparse
+                parsed = urlparse(endpoint_raw)
+                self.openai_endpoint = f"{parsed.scheme}://{parsed.netloc}/"
+                print(f"Extracted base endpoint: {self.openai_endpoint}")
+                
+                if '/deployments/' in endpoint_raw:
+                    parts = endpoint_raw.split('/deployments/')
+                    if len(parts) > 1:
+                        deployment_from_url = parts[1].split('/')[0].split('?')[0]
+                        if not os.getenv("AZURE_OPENAI_DEPLOYMENT"):
+                            self.openai_deployment = deployment_from_url
+                            print(f"Extracted deployment name from URL: {self.openai_deployment}")
+            else:
+                self.openai_endpoint = endpoint_raw.rstrip('/')
+        else:
+            self.openai_endpoint = None
         
         if not self.openai_api_key:
             print("WARNING: AZURE_OPENAI_API_KEY not found in environment variables")
@@ -48,16 +68,50 @@ class AzureClients:
     
     @property
     def openai_client(self) -> Optional[AzureOpenAI]:
+        import sys
+        sys.stdout.flush()
         try:
-            if not self._openai_client and self.openai_endpoint and self.openai_api_key:
-                self._openai_client = AzureOpenAI(
-                    api_key=self.openai_api_key,
-                    api_version=self.openai_api_version,
-                    azure_endpoint=self.openai_endpoint
-                )
+            if not self._openai_client:
+                print("\n" + "="*60, flush=True)
+                print("=== ATTEMPTING OPENAI CLIENT INITIALIZATION ===", flush=True)
+                print("="*60, flush=True)
+                print(f"Endpoint value: {self.openai_endpoint}")
+                print(f"API Key present: {bool(self.openai_api_key)}")
+                print(f"API Key length: {len(self.openai_api_key) if self.openai_api_key else 0}")
+                print(f"Deployment: {self.openai_deployment}")
+                print(f"API Version: {self.openai_api_version}")
+                
+                if not self.openai_endpoint:
+                    print("ERROR: AZURE_OPENAI_ENDPOINT is not set")
+                    return None
+                if not self.openai_api_key:
+                    print("ERROR: AZURE_OPENAI_API_KEY is not set")
+                    return None
+                
+                endpoint_clean = self.openai_endpoint.rstrip('/')
+                print(f"Initializing OpenAI client with endpoint: {endpoint_clean}")
+                print(f"Using deployment: {self.openai_deployment}, API version: {self.openai_api_version}")
+                
+                try:
+                    self._openai_client = AzureOpenAI(
+                        api_version=self.openai_api_version,
+                        azure_endpoint=endpoint_clean,
+                        api_key=self.openai_api_key
+                    )
+                    print("SUCCESS: OpenAI client initialized successfully!")
+                except Exception as init_error:
+                    print(f"FAILED to create AzureOpenAI client: {init_error}")
+                    print(f"Error type: {type(init_error).__name__}")
+                    import traceback
+                    traceback.print_exc()
+                    return None
+            else:
+                print("OpenAI client already initialized (reusing existing)")
             return self._openai_client
         except Exception as e:
-            print(f"Error creating OpenAI client: {e}")
+            print(f"ERROR in openai_client property: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     @property
