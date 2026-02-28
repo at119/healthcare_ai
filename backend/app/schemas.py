@@ -6,7 +6,7 @@ from datetime import datetime
 class DiaryEntryRequest(BaseModel):
     text: Optional[str] = Field(None, description="Text entry")
     audio_data: Optional[str] = Field(None, description="Base64 encoded audio data")
-    entry_type: str = Field(..., description="Type: 'food', 'mood', 'disease', or 'medication'")
+    entry_type: str = Field(..., description="Type: 'chronic_condition', 'genetic_condition', 'allergy', 'vitals', 'lifestyle_risk', 'past_illness', or 'medication'")
     timestamp: Optional[datetime] = Field(None, description="Entry timestamp")
 
 
@@ -23,7 +23,6 @@ class DiaryEntryResponse(BaseModel):
 class DiarySummaryResponse(BaseModel):
     total_entries: int
     date_range: Dict[str, str]
-    sentiment_trend: List[Dict[str, Any]]
     common_diseases: List[Dict[str, Any]]
     mood_patterns: List[Dict[str, Any]]
     suggestions: List[str]

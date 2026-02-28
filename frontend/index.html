@@ -25,11 +25,28 @@
                     <h2>Log Your Health Entry</h2>
                     <form id="diary-form">
                         <div class="form-group">
+                            <label>Gender:</label>
+                            <div style="display: flex; gap: 20px; margin-top: 5px;">
+                                <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                                    <input type="radio" name="gender" value="male" id="gender-male" onchange="saveGender('male')">
+                                    <span>Male</span>
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                                    <input type="radio" name="gender" value="female" id="gender-female" onchange="saveGender('female')">
+                                    <span>Female</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
                             <label for="entry-type">Entry Type:</label>
                             <select id="entry-type" required>
-                                <option value="food">Food</option>
-                                <option value="mood">Mood</option>
-                                <option value="disease">Disease/Genetic Illness</option>
+                                <option value="chronic_condition">Chronic Condition</option>
+                                <option value="genetic_condition">Genetic Condition</option>
+                                <option value="allergy">Allergy</option>
+                                <option value="vitals">Vitals</option>
+                                <option value="lifestyle_risk">Lifestyle Risk</option>
+                                <option value="past_illness">Past Illness</option>
                                 <option value="medication">Medication</option>
                             </select>
                         </div>
@@ -60,9 +77,13 @@
                         <label for="entry-filter">Filter by:</label>
                         <select id="entry-filter">
                             <option value="all">All Entries</option>
-                            <option value="food">Food</option>
-                            <option value="mood">Mood</option>
-                            <option value="disease">Disease/Illness</option>
+                            <option value="chronic_condition">Chronic Condition</option>
+                            <option value="genetic_condition">Genetic Condition</option>
+                            <option value="allergy">Allergy</option>
+                            <option value="vitals">Vitals</option>
+                            <option value="lifestyle_risk">Lifestyle Risk</option>
+                            <option value="past_illness">Past Illness</option>
+                            <option value="family_history">Family History</option>
                             <option value="medication">Medication</option>
                         </select>
                     </div>

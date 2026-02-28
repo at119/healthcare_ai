@@ -1,5 +1,7 @@
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
+import httpx
+import asyncio
 from .azure_clients import AzureClients
 
 
@@ -7,27 +9,6 @@ class DiaryPipeline:
     
     def __init__(self, azure_clients: AzureClients):
         self.azure_clients = azure_clients
-    
-    def analyze_sentiment(self, text: str) -> str:
-        if not self.azure_clients.openai_client:
-            return "neutral"
-        
-        try:
-            response = self.azure_clients.openai_client.chat.completions.create(
-                model=self.azure_clients.openai_deployment,
-                messages=[
-                    {"role": "system", "content": "You are a sentiment analyzer. Respond with only one word: 'positive', 'negative', or 'neutral'."},
-                    {"role": "user", "content": f"Analyze the sentiment of this health diary entry: {text}"}
-                ],
-                temperature=0.3,
-                max_tokens=10
-            )
-            sentiment = response.choices[0].message.content.strip().lower()
-            if sentiment not in ["positive", "negative", "neutral"]:
-                return "neutral"
-            return sentiment
-        except:
-            return "neutral"
     
     def generate_summary(self, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not entries:
@@ -42,7 +23,6 @@ class DiaryPipeline:
             }
         
         dates = [entry.get("timestamp", datetime.now()) for entry in entries]
-        sentiments = [entry.get("sentiment", "neutral") for entry in entries]
         
         diseases = {}
         moods = {}
@@ -65,15 +45,10 @@ class DiaryPipeline:
         
         suggestions = self._generate_suggestions(entries)
         
-        sentiment_counts = {"positive": 0, "negative": 0, "neutral": 0}
-        for sentiment in sentiments:
-            sentiment_counts[sentiment] = sentiment_counts.get(sentiment, 0) + 1
-        
         time_series = []
         for i, entry in enumerate(entries):
             time_series.append({
                 "date": entry.get("timestamp", datetime.now()).isoformat(),
-                "sentiment": entry.get("sentiment", "neutral"),
                 "type": entry.get("entry_type", "food")
             })
         
@@ -83,9 +58,7 @@ class DiaryPipeline:
                 "start": min(dates).isoformat() if dates else datetime.now().isoformat(),
                 "end": max(dates).isoformat() if dates else datetime.now().isoformat()
             },
-            "sentiment_trend": [
-                {"sentiment": k, "count": v} for k, v in sentiment_counts.items()
-            ],
+            "sentiment_trend": [],
             "common_diseases": [
                 {"disease": k, "count": v} for k, v in sorted(diseases.items(), key=lambda x: x[1], reverse=True)[:5]
             ],
@@ -95,7 +68,6 @@ class DiaryPipeline:
             "suggestions": suggestions,
             "visualization_data": {
                 "time_series": time_series,
-                "sentiment_distribution": sentiment_counts
             }
         }
     
@@ -135,14 +107,287 @@ class SOAPPipeline:
     
     def __init__(self, azure_clients: AzureClients):
         self.azure_clients = azure_clients
+        self.nlm_api_base = "https://clinicaltables.nlm.nih.gov/api/conditions/v3/search"
     
-    def generate_soap_note(self, transcription: str, health_entities: Optional[Dict] = None, diary_entries: Optional[List[Dict]] = None) -> Dict[str, str]:
+    async def _query_nlm_conditions(self, symptoms: List[str], max_results: int = 50) -> List[Dict[str, Any]]:
+        try:
+            symptom_query = " ".join(symptoms[:5])
+            params = {
+                "terms": symptom_query,
+                "maxList": min(max_results, 50),
+                "df": "primary_name,consumer_name",
+                "ef": "icd10cm_codes,icd10cm,term_icd9_code,term_icd9_text"
+            }
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(self.nlm_api_base, params=params)
+                response.raise_for_status()
+                data = response.json()
+            
+            if len(data) < 2:
+                return []
+            
+            total_count = data[0]
+            codes = data[1] if len(data) > 1 else []
+            extra_data = data[2] if len(data) > 2 else {}
+            display_data = data[3] if len(data) > 3 else []
+            
+            conditions = []
+            icd10_codes_array = extra_data.get("icd10cm_codes", []) if extra_data else []
+            icd10_list_array = extra_data.get("icd10cm", []) if extra_data else []
+            icd9_code_array = extra_data.get("term_icd9_code", []) if extra_data else []
+            icd9_text_array = extra_data.get("term_icd9_text", []) if extra_data else []
+            
+            for i, code in enumerate(codes):
+                condition_name = display_data[i][0] if i < len(display_data) and len(display_data[i]) > 0 else ""
+                consumer_name = display_data[i][1] if i < len(display_data) and len(display_data[i]) > 1 else condition_name
+                
+                icd10_codes = icd10_codes_array[i] if i < len(icd10_codes_array) else []
+                icd10_list = icd10_list_array[i] if i < len(icd10_list_array) else []
+                icd9_code = icd9_code_array[i] if i < len(icd9_code_array) else None
+                icd9_text = icd9_text_array[i] if i < len(icd9_text_array) else None
+                
+                if isinstance(icd10_codes, str):
+                    icd10_codes = [icd10_codes] if icd10_codes else []
+                elif not isinstance(icd10_codes, list):
+                    icd10_codes = []
+                
+                conditions.append({
+                    "code": code,
+                    "primary_name": condition_name,
+                    "consumer_name": consumer_name or condition_name,
+                    "icd10_codes": icd10_codes,
+                    "icd10_list": icd10_list if isinstance(icd10_list, list) else [],
+                    "icd9_code": icd9_code,
+                    "icd9_text": icd9_text
+                })
+            
+            print(f"[DIFFERENTIAL] Found {len(conditions)} possible conditions from NLM API")
+            return conditions[:max_results]
+        except Exception as e:
+            print(f"[DIFFERENTIAL] Error querying NLM API: {e}")
+            return []
+    
+    async def _perform_differential_diagnosis(self, transcription: str, diary_entries: Optional[List[Dict]] = None, gender: Optional[str] = None) -> Dict[str, Any]:
+        if not self.azure_clients.openai_client:
+            return {"possible_conditions": [], "eliminated_conditions": [], "final_diagnoses": []}
+        
+        try:
+            symptom_extraction_prompt = f"""Extract all symptoms, signs, and clinical findings from this patient dictation. List them as a simple comma-separated list of symptoms.
+
+Patient dictation:
+{transcription}
+
+Respond with ONLY a comma-separated list of symptoms, nothing else. Example: "headache, nausea, fever, facial swelling"
+"""
+            
+            response = self.azure_clients.openai_client.chat.completions.create(
+                model=self.azure_clients.openai_deployment,
+                messages=[
+                    {"role": "system", "content": "You are a medical symptom extractor. Extract symptoms from patient descriptions."},
+                    {"role": "user", "content": symptom_extraction_prompt}
+                ],
+                temperature=0.2,
+                max_tokens=200
+            )
+            
+            symptoms_text = response.choices[0].message.content.strip()
+            symptoms = [s.strip() for s in symptoms_text.split(",") if s.strip()]
+            print(f"[DIFFERENTIAL] Extracted symptoms: {symptoms}")
+            
+            if not symptoms:
+                return {"possible_conditions": [], "eliminated_conditions": [], "final_diagnoses": []}
+            
+            conditions = await self._query_nlm_conditions(symptoms, max_results=30)
+            
+            if not conditions:
+                print("[DIFFERENTIAL] No conditions found from NLM API")
+                return {"possible_conditions": [], "eliminated_conditions": [], "final_diagnoses": []}
+            
+            diary_context = ""
+            if diary_entries:
+                allergies = []
+                genetic_conditions = []
+                chronic_conditions = []
+                past_illnesses = []
+                medications = []
+                vitals = []
+                lifestyle_risks = []
+                family_history = []
+                
+                for entry in diary_entries:
+                    entry_type = entry.get("entry_type", "").lower()
+                    entry_text = entry.get("text", "").strip()
+                    
+                    if not entry_text:
+                        continue
+                    
+                    if entry_type == "chronic_condition":
+                        chronic_conditions.append(entry_text)
+                    elif entry_type == "genetic_condition":
+                        genetic_conditions.append(entry_text)
+                    elif entry_type == "allergy":
+                        allergies.append(entry_text)
+                    elif entry_type == "past_illness":
+                        past_illnesses.append(entry_text)
+                    elif entry_type == "medication":
+                        medications.append(entry_text)
+                    elif entry_type == "vitals":
+                        vitals.append(entry_text)
+                    elif entry_type == "lifestyle_risk":
+                        lifestyle_risks.append(entry_text)
+                    elif entry_type == "family_history":
+                        family_history.append(entry_text)
+                
+                diary_parts = []
+                if chronic_conditions:
+                    diary_parts.append(f"CHRONIC CONDITIONS (from patient diary): {', '.join(chronic_conditions)}")
+                if genetic_conditions:
+                    diary_parts.append(f"GENETIC CONDITIONS (from patient diary): {', '.join(genetic_conditions)}")
+                if allergies:
+                    diary_parts.append(f"ALLERGIES (from patient diary): {', '.join(allergies)}")
+                if past_illnesses:
+                    diary_parts.append(f"PAST MEDICAL HISTORY (from patient diary): {', '.join(past_illnesses)}")
+                if medications:
+                    diary_parts.append(f"CURRENT/PAST MEDICATIONS (from patient diary): {', '.join(medications)}")
+                if vitals:
+                    diary_parts.append(f"VITALS (from patient diary): {', '.join(vitals)}")
+                if lifestyle_risks:
+                    diary_parts.append(f"LIFESTYLE RISK FACTORS (from patient diary): {', '.join(lifestyle_risks)}")
+                if family_history:
+                    diary_parts.append(f"FAMILY HISTORY (from patient diary): {', '.join(family_history)}")
+                
+                if diary_parts:
+                    diary_context = "\n".join(diary_parts)
+                    print(f"[DIFFERENTIAL] Diary context prepared: {len(chronic_conditions)} chronic conditions, {len(genetic_conditions)} genetic conditions, {len(allergies)} allergies, {len(past_illnesses)} past illnesses, {len(medications)} medications, {len(vitals)} vitals, {len(lifestyle_risks)} lifestyle risks, {len(family_history)} family history entries")
+            
+            conditions_list = "\n".join([
+                f"{i+1}. {c['consumer_name']} (ICD-10: {', '.join(c['icd10_codes']) if c['icd10_codes'] else 'N/A'})"
+                for i, c in enumerate(conditions[:25])
+            ])
+            
+            elimination_prompt = f"""You are Dr. House performing differential diagnosis. Your job is to ELIMINATE impossible diagnoses based on contradictions.
+
+PATIENT GENDER: {gender.upper() if gender else "Not specified"}
+
+PATIENT SYMPTOMS (from current visit):
+{', '.join(symptoms)}
+
+PATIENT MEDICAL HISTORY (from health diary):
+{diary_context if diary_context else "No significant medical history documented in diary"}
+
+CRITICAL: Pay special attention to these factors for elimination:
+- FAMILY HISTORY: MANDATORY - Family history is a critical risk factor. If a condition appears in family history (e.g., "Mother → breast cancer at 42", "Father → colon cancer", "Sister → type 1 diabetes"), this significantly increases the patient's risk for that condition. DO NOT eliminate conditions that match family history - instead, prioritize them. However, if family history shows a condition that contradicts a possible diagnosis, consider eliminating. Example: If family history shows "Father → hemophilia" and patient is male, this is highly relevant for bleeding disorders.
+- CHRONIC CONDITIONS: These are ongoing conditions the patient has. If a possible diagnosis contradicts or conflicts with a chronic condition, ELIMINATE it. Example: If patient has "asthma" as chronic condition, eliminate diagnoses requiring normal lung function.
+- GENETIC CONDITIONS: These are permanent hereditary conditions. If a possible diagnosis contradicts a genetic condition, ELIMINATE it.
+- ALLERGIES: If a possible diagnosis would require exposure to an allergen the patient is allergic to, and patient shows no allergic reaction, consider eliminating. If patient has allergy to medication X, eliminate conditions that would require medication X.
+- PAST MEDICAL HISTORY: If patient has a past condition that makes a new diagnosis unlikely or impossible, ELIMINATE it.
+- MEDICATIONS: If patient is on medication Y that would prevent or contradict condition X, ELIMINATE it. Also check for drug-disease interactions.
+- VITALS: Use vital signs to eliminate conditions. Example: If patient has normal blood pressure, eliminate hypertensive crisis. If patient has elevated temperature, consider infectious causes.
+- LIFESTYLE RISK FACTORS: Consider lifestyle factors when eliminating. Example: If patient is non-smoker, eliminate smoking-related conditions. If patient has sedentary lifestyle, consider cardiovascular risks.
+
+POSSIBLE CONDITIONS (from medical database - NLM Clinical Tables):
+{conditions_list}
+
+TASK: Analyze each condition and ELIMINATE those that are IMPOSSIBLE based on:
+1. GENDER contradictions: If a condition is gender-specific and patient's gender doesn't match, ELIMINATE it. Examples: Breast cancer in males (unless rare cases), prostate cancer in females, ovarian cancer in males, testicular cancer in females. If patient is MALE, eliminate female-specific conditions. If patient is FEMALE, eliminate male-specific conditions.
+2. FAMILY HISTORY risk assessment: MANDATORY - Family history is a critical factor. If family history shows a condition (e.g., "Mother → breast cancer", "Father → colon cancer", "Sister → type 1 diabetes"), this INCREASES risk for that condition, so DO NOT eliminate it. However, if family history contradicts a possible diagnosis, consider eliminating. Example: If family history shows "Father → hemophilia" and patient is male, prioritize bleeding disorders. If family history shows "Mother → breast cancer at 42" and patient is female, breast cancer should be considered, not eliminated.
+3. Symptom contradictions: If a condition requires symptom X but patient has symptom Y that contradicts it, ELIMINATE it
+4. CHRONIC CONDITION contradictions: If patient has CHRONIC CONDITION Z that makes condition X impossible or contradictory, ELIMINATE it. Example: If patient has "diabetes" as chronic condition and a possible condition requires normal glucose metabolism, ELIMINATE it.
+5. GENETIC CONDITION contradictions: If patient has genetic condition G that contradicts condition X, ELIMINATE it
+6. ALLERGY contradictions: If condition X would require exposure to allergen patient is allergic to, and no allergic reaction is present, ELIMINATE it. If condition requires medication patient is allergic to, ELIMINATE it.
+7. Past medical history contradictions: If patient has past condition Z that makes condition X impossible, ELIMINATE it
+8. Medication interactions: If patient is on medication Y that would prevent or contradict condition X, ELIMINATE it. Check for drug-disease interactions.
+9. VITALS contradictions: If patient's vital signs contradict what condition X requires, ELIMINATE it. Example: Normal BP eliminates hypertensive crisis.
+10. LIFESTYLE RISK contradictions: If condition X requires lifestyle factor patient doesn't have, consider eliminating. Example: Non-smoker eliminates smoking-related conditions.
+
+For each condition, determine:
+- KEEP: Condition is still possible given symptoms, active diseases, and history
+- ELIMINATE: Condition is impossible due to contradictions with active diseases, symptoms, or history
+
+Respond in this EXACT format:
+KEEP: [condition number] - [condition name] - [brief reason why it's still possible, referencing active diseases if relevant]
+ELIMINATE: [condition number] - [condition name] - [brief reason why it's impossible, specifically mentioning which active disease/past condition/medication contradicts it]
+
+List ALL conditions. Be thorough and logical. Think like Dr. House - eliminate what doesn't fit. Always reference the specific disease/condition from the diary when eliminating."""
+            
+            response = self.azure_clients.openai_client.chat.completions.create(
+                model=self.azure_clients.openai_deployment,
+                messages=[
+                    {"role": "system", "content": "You are a diagnostic expert like Dr. House. You eliminate impossible diagnoses through logical deduction based on symptom patterns and medical history."},
+                    {"role": "user", "content": elimination_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=2000
+            )
+            
+            elimination_text = response.choices[0].message.content.strip()
+            print(f"[DIFFERENTIAL] Elimination analysis:\n{elimination_text[:500]}...")
+            
+            kept_conditions = []
+            eliminated_conditions = []
+            
+            for line in elimination_text.split("\n"):
+                line = line.strip()
+                if line.startswith("KEEP:"):
+                    parts = line.replace("KEEP:", "").strip().split(" - ", 2)
+                    if len(parts) >= 2:
+                        try:
+                            cond_num = int(parts[0].strip()) - 1
+                            if 0 <= cond_num < len(conditions):
+                                kept_conditions.append({
+                                    "condition": conditions[cond_num],
+                                    "reason": parts[2] if len(parts) > 2 else "Possible based on symptoms"
+                                })
+                        except:
+                            pass
+                elif line.startswith("ELIMINATE:"):
+                    parts = line.replace("ELIMINATE:", "").strip().split(" - ", 2)
+                    if len(parts) >= 2:
+                        try:
+                            cond_num = int(parts[0].strip()) - 1
+                            if 0 <= cond_num < len(conditions):
+                                eliminated_conditions.append({
+                                    "condition": conditions[cond_num],
+                                    "reason": parts[2] if len(parts) > 2 else "Contradicts symptoms or history"
+                                })
+                        except:
+                            pass
+            
+            print(f"[DIFFERENTIAL] Kept {len(kept_conditions)} conditions, eliminated {len(eliminated_conditions)}")
+            
+            return {
+                "possible_conditions": conditions,
+                "kept_conditions": kept_conditions,
+                "eliminated_conditions": eliminated_conditions,
+                "symptoms": symptoms,
+                "diary_context": diary_context
+            }
+        except Exception as e:
+            print(f"[DIFFERENTIAL] Error in differential diagnosis: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"possible_conditions": [], "eliminated_conditions": [], "final_diagnoses": []}
+    
+    async def generate_soap_note(self, transcription: str, health_entities: Optional[Dict] = None, diary_entries: Optional[List[Dict]] = None, gender: Optional[str] = None) -> Dict[str, str]:
         if not self.azure_clients.openai_client:
             print("WARNING: OpenAI client not available, using fallback SOAP generation")
             return self._generate_fallback_soap(transcription, health_entities)
         
         try:
-            context = transcription
+            differential_result = await self._perform_differential_diagnosis(transcription, diary_entries, gender)
+            kept_diagnoses = [dc["condition"]["consumer_name"] for dc in differential_result.get("kept_conditions", [])]
+            eliminated_diagnoses = [dc["condition"]["consumer_name"] for dc in differential_result.get("eliminated_conditions", [])]
+            
+            differential_context = ""
+            if kept_diagnoses:
+                differential_context = f"\n\n=== DIFFERENTIAL DIAGNOSIS ANALYSIS ===\n"
+                differential_context += f"Possible diagnoses (after elimination): {', '.join(kept_diagnoses[:5])}\n"
+                if eliminated_diagnoses:
+                    differential_context += f"Eliminated diagnoses (contradictions found): {', '.join(eliminated_diagnoses[:5])}\n"
+                differential_context += "=== END DIFFERENTIAL ANALYSIS ===\n"
+            
+            context = transcription + differential_context
             entities_context = ""
             if health_entities and health_entities.get("entities"):
                 entities_list = []
@@ -153,19 +398,44 @@ class SOAPPipeline:
             
             diary_context = ""
             if diary_entries and len(diary_entries) > 0:
-                relevant_entries = []
-                for entry in diary_entries:
-                    if entry.get("entry_type") in ["disease", "medication"]:
-                        entry_date = entry.get("timestamp", "")
-                        entry_text = entry.get("text", "")
-                        entry_type = entry.get("entry_type", "")
-                        relevant_entries.append(f"- {entry_type.upper()}: {entry_text} (Logged: {entry_date})")
+                medical_entries = []
+                medication_entries = []
                 
-                if relevant_entries:
-                    diary_context = "\n\n=== PATIENT HEALTH DIARY ENTRIES (MEDICAL HISTORY) ===\n" + "\n".join(relevant_entries) + "\n=== END DIARY ENTRIES ===\n"
+                for entry in diary_entries:
+                    entry_type = entry.get("entry_type", "").lower()
+                    entry_text = entry.get("text", "").strip()
+                    entry_date = entry.get("timestamp", "")
+                    
+                    if not entry_text:
+                        continue
+                    
+                    if entry_type == "chronic_condition":
+                        medical_entries.append(f"CHRONIC CONDITION: {entry_text} (Logged: {entry_date})")
+                    elif entry_type == "genetic_condition":
+                        medical_entries.append(f"GENETIC CONDITION: {entry_text} (Logged: {entry_date})")
+                    elif entry_type == "allergy":
+                        medical_entries.append(f"ALLERGY: {entry_text} (Logged: {entry_date})")
+                    elif entry_type == "past_illness":
+                        medical_entries.append(f"PAST ILLNESS: {entry_text} (Logged: {entry_date})")
+                    elif entry_type == "vitals":
+                        medical_entries.append(f"VITALS: {entry_text} (Logged: {entry_date})")
+                    elif entry_type == "lifestyle_risk":
+                        medical_entries.append(f"LIFESTYLE RISK: {entry_text} (Logged: {entry_date})")
+                    elif entry_type == "family_history":
+                        medical_entries.append(f"FAMILY HISTORY: {entry_text} (Logged: {entry_date})")
+                    elif entry_type == "medication":
+                        medication_entries.append(f"MEDICATION: {entry_text} (Logged: {entry_date})")
+                
+                if medical_entries or medication_entries:
+                    diary_context = "\n\n=== PATIENT HEALTH DIARY ENTRIES (MEDICAL HISTORY) ===\n"
+                    if medical_entries:
+                        diary_context += "MEDICAL CONDITIONS/FACTORS:\n" + "\n".join(medical_entries) + "\n"
+                    if medication_entries:
+                        diary_context += "MEDICATIONS:\n" + "\n".join(medication_entries) + "\n"
+                    diary_context += "=== END DIARY ENTRIES ===\n"
                     context += diary_context
-                    print(f"Including {len(relevant_entries)} diary entries in SOAP context:")
-                    for entry in relevant_entries:
+                    print(f"Including {len(medical_entries)} medical entries and {len(medication_entries)} medication entries in SOAP context:")
+                    for entry in medical_entries + medication_entries:
                         print(f"  - {entry}")
             
             system_prompt = """You are a clinical documentation assistant. Your role is to create professional SOAP notes in standard clinical format.
@@ -191,14 +461,16 @@ CRITICAL RULES:
 
             diary_instruction = ""
             if diary_context:
-                diary_instruction = "\n\nCRITICAL: The patient has logged health diary entries above showing their medical history. You MUST reference these entries in your SOAP note:\n\n1. SUBJECTIVE section: Include ALL diseases/conditions and medications from diary entries in the medical history. For example: 'Past medical history: Diabetes type 3 (per patient diary). Current medications: [list from diary].'\n\n2. ASSESSMENT section: You MUST consider existing conditions from diary when making diagnoses. If patient has diabetes type 3, this significantly affects assessment. State: 'Primary: [diagnosis]. Patient's history of [disease from diary] is relevant as [explanation].'\n\n3. PLAN section: Account for existing medications and conditions. Check for interactions, contraindications, or necessary adjustments based on diary entries.\n\nDO NOT ignore diary entries. They are part of the patient's documented medical history and must be included."
+                diary_instruction = "\n\nCRITICAL: The patient has logged health diary entries above showing their medical history. You MUST reference these entries in your SOAP note:\n\n1. SUBJECTIVE section: Include ALL medical information from diary entries:\n   - Chronic conditions (e.g., 'Chronic conditions: Asthma, Diabetes (per patient diary)')\n   - Genetic conditions (e.g., 'Genetic conditions: Hemophilia (per patient diary)')\n   - Allergies (e.g., 'Allergies: Penicillin, Peanuts (per patient diary)')\n   - Past medical history (e.g., 'Past medical history: Pneumonia (per patient diary)')\n   - Family history (e.g., 'Family history: Mother → breast cancer at 42, Father → colon cancer (per patient diary)')\n   - Vitals (e.g., 'Vitals: BP 120/80, HR 72 (per patient diary)')\n   - Lifestyle risk factors (e.g., 'Lifestyle: Non-smoker, Sedentary (per patient diary)')\n   - Current medications: [list ALL medications from diary]\n\n2. ASSESSMENT section: You MUST consider ALL diary entries when making diagnoses. MANDATORY: Family history is a critical risk factor. If family history shows a condition (e.g., 'Mother → breast cancer at 42'), this significantly increases the patient's risk for that condition. Reference how chronic conditions, genetic conditions, allergies, family history, vitals, and lifestyle factors affect the diagnosis. State: 'Primary: [diagnosis]. Patient's documented [chronic condition/genetic condition/allergy/family history] from diary is relevant as [explanation].'\n\n3. PLAN section: Account for ALL diary entries. Check for:\n   - Drug-disease interactions (e.g., if patient has asthma, avoid medications that worsen it)\n   - Drug-allergy interactions (e.g., if patient is allergic to penicillin, avoid it)\n   - Disease-disease interactions (e.g., if patient has diabetes, consider how it affects treatment)\n   - Family history-based screening recommendations (e.g., if family history shows breast cancer, recommend appropriate screening)\n   - Vitals-based considerations (e.g., if patient has hypertension, monitor BP)\n   - Lifestyle-based recommendations\n   - Contraindications based on ALL diary entries\n\nDO NOT ignore diary entries. They are part of the patient's documented medical history and must be included. When a condition is listed in the diary, treat it as a confirmed medical fact. Family history entries MUST be considered as significant risk factors."
+            
+            gender_info = f"\nPATIENT GENDER: {gender.upper() if gender else 'Not specified'}\n" if gender else ""
             
             user_prompt = f"""Create a clinical SOAP note from this patient dictation. Write as a professional medical document.
 
 Patient dictation:
 {context}
 {diary_instruction}
-
+{gender_info}
 IMPORTANT: The diary entries shown above are PART OF THE PATIENT'S MEDICAL RECORD. You MUST include them in your SOAP note. They are not optional - they are documented medical history.
 
 Generate a SOAP note in clinical format:
@@ -223,12 +495,13 @@ Document only measurable or observable findings:
 
 ===ASSESSMENT===
 Provide differential diagnoses with clinical reasoning:
-- Most likely diagnosis based on symptom pattern AND existing conditions from diary
-- 2-4 differential diagnoses ranked by likelihood
-- Brief clinical reasoning for each
+- CRITICAL: Use the differential diagnosis analysis provided above. The system has already eliminated impossible diagnoses based on symptom contradictions and medical history.
+- Primary diagnosis: Choose from the "Possible diagnoses (after elimination)" list above, prioritizing the most likely based on symptom pattern
+- 2-4 differential diagnoses: Use the kept diagnoses from the elimination analysis, ranked by likelihood
+- For each diagnosis, explain WHY it was kept (not eliminated) and how it fits the symptoms
+- MANDATORY: Reference eliminated diagnoses and explain WHY they were ruled out (e.g., "Ruled out [condition] due to [contradiction]")
 - MANDATORY: You MUST reference diseases/conditions from diary entries in your assessment
-- If patient has diabetes type 3 in diary, you MUST state how this affects the current presentation
-- Example: "Primary: Hyperglycemia. Patient's documented history of Diabetes type 3 (per diary) is highly relevant as this condition directly relates to blood sugar dysregulation. The headache may be secondary to hyperglycemia given this history."
+- Example: "Primary: [diagnosis from kept list]. Patient's documented history of [disease from diary] supports this diagnosis. Ruled out [eliminated condition] because [reason from elimination analysis]."
 - Use medical terminology and standard diagnostic criteria
 - Format as concise clinical text, not long paragraphs
 
@@ -248,7 +521,7 @@ Document clear clinical management steps:
 3. Follow-up in [timeframe]
 4. [Additional step]
 
-Remember: Write as a clinical document. Use third person. Be concise and professional. Reference diary entries for medical history, existing conditions, and medications."""
+Remember: Write as a clinical document. Use third person. Be concise and professional. Reference diary entries for medical history, existing conditions, and medications. Consider patient gender when documenting conditions and treatment plans."""
 
             print(f"Calling Azure OpenAI with transcription: {transcription[:100]}...")
             print(f"OpenAI client available: {self.azure_clients.openai_client is not None}")
@@ -280,7 +553,7 @@ Remember: Write as a clinical document. Use third person. Be concise and profess
             traceback.print_exc()
             return self._generate_fallback_soap(transcription, health_entities)
     
-    def update_soap_incremental(self, new_text_chunk: str, current_soap: Dict[str, str], full_transcript: str, diary_entries: Optional[List[Dict]] = None) -> Dict[str, str]:
+    async def update_soap_incremental(self, new_text_chunk: str, current_soap: Dict[str, str], full_transcript: str, diary_entries: Optional[List[Dict]] = None, gender: Optional[str] = None) -> Dict[str, str]:
         if not self.azure_clients.openai_client:
             return current_soap
         
@@ -310,6 +583,8 @@ Remember: Write as a clinical document. Use third person. Be concise and profess
             elif not has_plan:
                 priority_instruction = "\n\nPRIORITY: Generate Plan section. Assessment should already exist."
             
+            gender_info = f"\nPATIENT GENDER: {gender.upper() if gender else 'Not specified'}\n" if gender else ""
+            
             update_prompt = f"""You are updating a clinical SOAP note incrementally during live transcription. You have the current SOAP note state and transcript.
 
 Current SOAP Note State:
@@ -321,6 +596,7 @@ Plan: {current_soap.get('plan', '')}
 Full transcript so far: {full_transcript}
 New text chunk to incorporate: {new_text_chunk}
 {diary_context}
+{gender_info}
 {priority_instruction}
 
 Your task: Update the SOAP note by incorporating the new information. Follow these priorities:

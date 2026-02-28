@@ -46,6 +46,30 @@ function loadEntriesFromLocal() {
     }
 }
 
+function saveGender(gender) {
+    try {
+        localStorage.setItem('patient_gender', gender);
+    } catch (error) {
+        console.error('Error saving gender:', error);
+    }
+}
+
+function loadGender() {
+    try {
+        return localStorage.getItem('patient_gender') || null;
+    } catch (error) {
+        console.error('Error loading gender:', error);
+        return null;
+    }
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+    const gender = loadGender();
+    if (gender) {
+        document.getElementById(`gender-${gender}`).checked = true;
+    }
+});
+
 document.getElementById('diary-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     
@@ -85,7 +109,6 @@ document.getElementById('diary-form').addEventListener('submit', async (e) => {
             text: text,
             entry_type: entryType,
             timestamp: new Date().toISOString(),
-            sentiment: analyzeSentiment(text),
             suggestions: []
         };
         
@@ -110,15 +133,6 @@ document.getElementById('diary-form').addEventListener('submit', async (e) => {
 
 let allEntries = [];
 
-function analyzeSentiment(text) {
-    const lowerText = text.toLowerCase();
-    if (lowerText.match(/\b(good|great|excellent|happy|well|better|improved|feeling good)\b/)) {
-        return 'positive';
-    } else if (lowerText.match(/\b(bad|terrible|awful|sad|pain|hurt|worse|feeling bad|unwell)\b/)) {
-        return 'negative';
-    }
-    return 'neutral';
-}
 
 function loadDiaryEntries() {
     allEntries = loadEntriesFromLocal();
@@ -146,15 +160,26 @@ function applyFilter() {
         const dateStr = date.toLocaleDateString();
         const timeStr = date.toLocaleTimeString();
         
+        const entryTypeLabels = {
+            'chronic_condition': 'Chronic Condition',
+            'genetic_condition': 'Genetic Condition',
+            'allergy': 'Allergy',
+            'vitals': 'Vitals',
+            'lifestyle_risk': 'Lifestyle Risk',
+            'past_illness': 'Past Illness',
+            'family_history': 'Family History',
+            'medication': 'Medication'
+        };
+        const entryTypeLabel = entryTypeLabels[entry.entry_type] || entry.entry_type;
+        
         return `
             <div class="entry-card">
                 <div class="entry-header">
-                    <span class="entry-type badge badge-${entry.entry_type}">${entry.entry_type}</span>
+                    <span class="entry-type badge badge-${entry.entry_type}">${entryTypeLabel}</span>
                     <span class="entry-date">${dateStr} at ${timeStr}</span>
                     <button class="btn-delete" onclick="deleteEntry('${entry.id}')">×</button>
                 </div>
                 <div class="entry-text">${entry.text}</div>
-                ${entry.sentiment ? `<div class="entry-sentiment">Sentiment: <span class="sentiment-${entry.sentiment}">${entry.sentiment}</span></div>` : ''}
                 ${entry.suggestions && entry.suggestions.length > 0 ? `
                     <div class="entry-suggestions">
                         <strong>Suggestions:</strong>
@@ -179,38 +204,18 @@ function loadDiarySummary() {
             return;
         }
         
-        const sentiments = entries.map(entry => entry.sentiment || analyzeSentiment(entry.text));
-        const sentimentCounts = { positive: 0, negative: 0, neutral: 0 };
-        sentiments.forEach(s => sentimentCounts[s] = (sentimentCounts[s] || 0) + 1);
         
         const diseases = {};
-        const moods = {};
-        const foods = {};
         const medications = {};
         
         entries.forEach(entry => {
             const text = entry.text.toLowerCase();
             
-            if (entry.entry_type === 'disease') {
+            if (entry.entry_type === 'chronic_condition' || entry.entry_type === 'past_illness' || entry.entry_type === 'genetic_condition') {
                 const commonDiseases = ['diabetes', 'hypertension', 'asthma', 'arthritis', 'heart disease', 'cancer', 'thyroid', 'copd', 'depression', 'anxiety'];
                 commonDiseases.forEach(disease => {
                     if (text.includes(disease)) {
                         diseases[disease] = (diseases[disease] || 0) + 1;
-                    }
-                });
-            } else if (entry.entry_type === 'mood') {
-                if (text.match(/\b(happy|good|great|excellent|positive)\b/)) {
-                    moods['positive'] = (moods['positive'] || 0) + 1;
-                } else if (text.match(/\b(sad|bad|terrible|negative|down)\b/)) {
-                    moods['negative'] = (moods['negative'] || 0) + 1;
-                } else {
-                    moods['neutral'] = (moods['neutral'] || 0) + 1;
-                }
-            } else if (entry.entry_type === 'food') {
-                const commonFoods = ['breakfast', 'lunch', 'dinner', 'snack', 'water', 'coffee', 'tea'];
-                commonFoods.forEach(food => {
-                    if (text.includes(food)) {
-                        foods[food] = (foods[food] || 0) + 1;
                     }
                 });
             } else if (entry.entry_type === 'medication') {
@@ -232,17 +237,15 @@ function loadDiarySummary() {
         const summary = {
             total_entries: entries.length,
             date_range: dateRange,
-            sentiment_trend: Object.entries(sentimentCounts).map(([sentiment, count]) => ({ sentiment, count })),
+            sentiment_trend: [],
             common_diseases: Object.entries(diseases).map(([disease, count]) => ({ disease, count })).sort((a, b) => b.count - a.count).slice(0, 5),
             mood_patterns: Object.entries(moods).map(([mood, count]) => ({ mood, count })),
             suggestions: [],
             visualization_data: {
                 time_series: entries.map(e => ({
                     date: e.timestamp,
-                    sentiment: e.sentiment || analyzeSentiment(e.text),
                     type: e.entry_type
-                })),
-                sentiment_distribution: sentimentCounts
+                }))
             }
         };
         
@@ -251,10 +254,6 @@ function loadDiarySummary() {
                 <div class="stat-card">
                     <div class="stat-value">${summary.total_entries}</div>
                     <div class="stat-label">Total Entries</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value">${summary.sentiment_trend.length}</div>
-                    <div class="stat-label">Sentiment Categories</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-value">${summary.common_diseases ? summary.common_diseases.length : 0}</div>
@@ -316,7 +315,13 @@ document.getElementById('clinical-form').addEventListener('submit', async (e) =>
     try {
         const diaryEntries = loadEntriesFromLocal();
         const relevantEntries = diaryEntries.filter(entry => 
-            entry.entry_type === 'disease' || entry.entry_type === 'medication'
+            entry.entry_type === 'chronic_condition' || 
+            entry.entry_type === 'genetic_condition' || 
+            entry.entry_type === 'allergy' || 
+            entry.entry_type === 'vitals' || 
+            entry.entry_type === 'lifestyle_risk' || 
+            entry.entry_type === 'past_illness' || 
+            entry.entry_type === 'medication'
         );
         
         const formData = new FormData();
@@ -327,6 +332,10 @@ document.getElementById('clinical-form').addEventListener('submit', async (e) =>
             formData.append('text', text);
         }
         formData.append('diary_entries', JSON.stringify(relevantEntries));
+        const gender = loadGender();
+        if (gender) {
+            formData.append('gender', gender);
+        }
         
         const endpoint = audioData 
             ? `${API_BASE_URL}/api/clinical/transcribe`
@@ -568,17 +577,25 @@ async function startClinicalStreaming() {
         
         const diaryEntries = loadEntriesFromLocal();
         const relevantEntries = diaryEntries.filter(entry => 
-            entry.entry_type === 'disease' || entry.entry_type === 'medication'
+            entry.entry_type === 'chronic_condition' || 
+            entry.entry_type === 'genetic_condition' || 
+            entry.entry_type === 'allergy' || 
+            entry.entry_type === 'vitals' || 
+            entry.entry_type === 'lifestyle_risk' || 
+            entry.entry_type === 'past_illness' || 
+            entry.entry_type === 'medication'
         );
         
         const wsUrl = API_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://');
         clinicalWebSocket = new WebSocket(`${wsUrl}/ws/clinical/stream`);
         
         clinicalWebSocket.onopen = async () => {
+            const gender = loadGender();
             await clinicalWebSocket.send(JSON.stringify({
                 type: "init",
                 language: "en-US",
-                diary_entries: JSON.stringify(relevantEntries)
+                diary_entries: JSON.stringify(relevantEntries),
+                gender: gender || null
             }));
         };
         

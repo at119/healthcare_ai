@@ -171,14 +171,11 @@ async def create_diary_entry(
             except:
                 pass
         
-        sentiment = diary_pipeline.analyze_sentiment(transcribed_text)
-        
         entry_dict = {
             "id": str(uuid.uuid4()),
             "text": transcribed_text,
             "entry_type": entry_type,
-            "timestamp": entry_timestamp,
-            "sentiment": sentiment
+            "timestamp": entry_timestamp
         }
         
         suggestions = diary_pipeline._generate_suggestions([entry_dict])
@@ -190,7 +187,6 @@ async def create_diary_entry(
             text=transcribed_text,
             entry_type=entry_type,
             timestamp=entry_timestamp,
-            sentiment=sentiment,
             summary=None,
             suggestions=suggestions
         )
@@ -208,7 +204,6 @@ async def get_diary_entries():
             text=entry["text"],
             entry_type=entry["entry_type"],
             timestamp=entry["timestamp"],
-            sentiment=entry.get("sentiment"),
             summary=None,
             suggestions=[]
         )
@@ -241,7 +236,8 @@ async def delete_diary_entry(entry_id: str):
 async def transcribe_clinical_note(
     audio_data: str = Form(...),
     language: str = Form("en-US"),
-    diary_entries: str = Form(None)
+    diary_entries: str = Form(None),
+    gender: str = Form(None)
 ):
     try:
         audio_bytes = decode_audio_base64(audio_data)
@@ -265,7 +261,7 @@ async def transcribe_clinical_note(
         else:
             print("No diary entries received in transcribe endpoint")
         
-        soap_note_dict = soap_pipeline.generate_soap_note(transcription, None, entries_list)
+        soap_note_dict = await soap_pipeline.generate_soap_note(transcription, None, entries_list, gender)
         soap_note = SOAPNote(**soap_note_dict)
         
         return ClinicalNoteResponse(
@@ -380,7 +376,7 @@ async def test_openai():
 
 
 @app.post("/api/clinical/text-to-soap", response_model=ClinicalNoteResponse)
-async def text_to_soap(text: str = Form(...), diary_entries: str = Form(None)):
+async def text_to_soap(text: str = Form(...), diary_entries: str = Form(None), gender: str = Form(None)):
     try:
         print(f"\n=== SOAP Generation Request ===")
         print(f"OpenAI client check: {azure_clients.openai_client is not None}")
@@ -405,7 +401,7 @@ async def text_to_soap(text: str = Form(...), diary_entries: str = Form(None)):
         else:
             print("No diary entries received")
         
-        soap_note_dict = soap_pipeline.generate_soap_note(text, None, entries_list)
+        soap_note_dict = await soap_pipeline.generate_soap_note(text, None, entries_list, gender)
         soap_note = SOAPNote(**soap_note_dict)
         
         return ClinicalNoteResponse(
@@ -470,12 +466,14 @@ async def websocket_clinical_stream(websocket: WebSocket):
     
     try:
         init_data = await websocket.receive_json()
+        gender = None
         if init_data.get("type") == "init":
             if init_data.get("diary_entries"):
                 try:
                     diary_entries = json.loads(init_data["diary_entries"])
                 except:
                     pass
+            gender = init_data.get("gender")
             
             recognizer, push_stream = azure_clients.start_continuous_recognition(
                 speech_callback,
@@ -503,14 +501,12 @@ async def websocket_clinical_stream(websocket: WebSocket):
                             update_buffer = []
                             new_text = " ".join(final_chunks)
                         
-                        updated_soap = await loop.run_in_executor(
-                            None,
-                            lambda: soap_pipeline.update_soap_incremental(
-                                new_text if new_text else current_transcript,
-                                current_soap,
-                                current_transcript,
-                                diary_entries
-                            )
+                        updated_soap = await soap_pipeline.update_soap_incremental(
+                            new_text if new_text else current_transcript,
+                            current_soap,
+                            current_transcript,
+                            diary_entries,
+                            gender
                         )
                         
                         changed_sections = []
@@ -593,10 +589,7 @@ async def websocket_clinical_stream(websocket: WebSocket):
             print(f"Current incremental SOAP state: {current_soap}")
             print(f"Diary entries: {len(diary_entries)}")
             
-            final_soap = await loop.run_in_executor(
-                None,
-                lambda: soap_pipeline.generate_soap_note(current_transcript, None, diary_entries)
-            )
+            final_soap = await soap_pipeline.generate_soap_note(current_transcript, None, diary_entries, gender)
             
             print(f"=== FINAL SOAP GENERATED ===")
             print(f"Subjective: {final_soap.get('subjective', '')[:100]}...")
@@ -615,10 +608,7 @@ async def websocket_clinical_stream(websocket: WebSocket):
             traceback.print_exc()
             try:
                 print("Attempting fallback: generating fresh SOAP from transcript...")
-                final_soap = await loop.run_in_executor(
-                    None,
-                    lambda: soap_pipeline.generate_soap_note(current_transcript or "No transcript available", None, diary_entries)
-                )
+                final_soap = await soap_pipeline.generate_soap_note(current_transcript or "No transcript available", None, diary_entries)
                 await websocket.send_json({
                     "type": "final",
                     "transcription": current_transcript or "Error occurred",
