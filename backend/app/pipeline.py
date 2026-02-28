@@ -280,6 +280,77 @@ Remember: Write as a clinical document. Use third person. Be concise and profess
             traceback.print_exc()
             return self._generate_fallback_soap(transcription, health_entities)
     
+    def update_soap_incremental(self, new_text_chunk: str, current_soap: Dict[str, str], full_transcript: str, diary_entries: Optional[List[Dict]] = None) -> Dict[str, str]:
+        if not self.azure_clients.openai_client:
+            return current_soap
+        
+        try:
+            diary_context = ""
+            if diary_entries and len(diary_entries) > 0:
+                relevant_entries = []
+                for entry in diary_entries:
+                    if entry.get("entry_type") in ["disease", "medication"]:
+                        entry_date = entry.get("timestamp", "")
+                        entry_text = entry.get("text", "")
+                        entry_type = entry.get("entry_type", "")
+                        relevant_entries.append(f"- {entry_type.upper()}: {entry_text} (Logged: {entry_date})")
+                
+                if relevant_entries:
+                    diary_context = "\n\n=== PATIENT HEALTH DIARY ENTRIES (MEDICAL HISTORY) ===\n" + "\n".join(relevant_entries) + "\n=== END DIARY ENTRIES ===\n"
+            
+            update_prompt = f"""You are updating a clinical SOAP note incrementally. You have the current SOAP note state and a new text chunk from the patient dictation.
+
+Current SOAP Note State:
+Subjective: {current_soap.get('subjective', '')}
+Objective: {current_soap.get('objective', 'No objective findings documented.')}
+Assessment: {current_soap.get('assessment', '')}
+Plan: {current_soap.get('plan', '')}
+
+Full transcript so far: {full_transcript}
+New text chunk to incorporate: {new_text_chunk}
+{diary_context}
+
+Your task: Update the SOAP note by incorporating the new text chunk. Do NOT regenerate from scratch. Only update the relevant sections with the new information.
+
+Rules:
+1. Merge new information into existing sections
+2. Keep existing content that is still valid
+3. Update sections that are affected by the new text
+4. Maintain clinical format and third-person language
+5. Reference diary entries if relevant
+
+Return the updated SOAP note in this exact format:
+
+===SUBJECTIVE===
+[Updated subjective section]
+
+===OBJECTIVE===
+[Updated objective section]
+
+===ASSESSMENT===
+[Updated assessment section]
+
+===PLAN===
+[Updated plan section]"""
+
+            response = self.azure_clients.openai_client.chat.completions.create(
+                model=self.azure_clients.openai_deployment,
+                messages=[
+                    {"role": "system", "content": "You are a clinical documentation assistant. Update SOAP notes incrementally by merging new information into existing sections."},
+                    {"role": "user", "content": update_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=2000
+            )
+            
+            soap_text = response.choices[0].message.content.strip()
+            updated_soap = self._parse_soap_response(soap_text, full_transcript)
+            
+            return updated_soap
+        except Exception as e:
+            print(f"Error in incremental SOAP update: {e}")
+            return current_soap
+    
     def _generate_fallback_soap(self, transcription: str, health_entities: Optional[Dict] = None) -> Dict[str, str]:
         print("WARNING: Using rule-based fallback. OpenAI client should be configured for dynamic AI analysis.")
         transcription_lower = transcription.lower()

@@ -3,9 +3,11 @@ import json
 import uuid
 from datetime import datetime
 from typing import List, Dict, Any
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import asyncio
+import threading
 from dotenv import load_dotenv
 
 from .azure_clients import AzureClients
@@ -426,6 +428,187 @@ async def text_to_soap(text: str = Form(...), diary_entries: str = Form(None)):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error generating SOAP note: {str(e)}")
+
+
+@app.websocket("/ws/clinical/stream")
+async def websocket_clinical_stream(websocket: WebSocket):
+    await websocket.accept()
+    
+    recognizer = None
+    push_stream = None
+    current_transcript = ""
+    current_soap = {
+        "subjective": "",
+        "objective": "No objective findings documented.",
+        "assessment": "",
+        "plan": ""
+    }
+    diary_entries = []
+    update_buffer = []
+    loop = asyncio.get_event_loop()
+    
+    def speech_callback(result_type, text):
+        nonlocal current_transcript, update_buffer
+        
+        if result_type == "final":
+            current_transcript += " " + text if current_transcript else text
+            current_transcript = current_transcript.strip()
+            update_buffer.append(("final", text))
+            
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(websocket.send_json({
+                    "type": "transcription",
+                    "status": "final",
+                    "text": text,
+                    "full_transcript": current_transcript
+                }))
+            )
+        elif result_type == "interim":
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(websocket.send_json({
+                    "type": "transcription",
+                    "status": "interim",
+                    "text": text
+                }))
+            )
+        elif result_type == "error":
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(websocket.send_json({
+                    "type": "error",
+                    "message": text
+                }))
+            )
+    
+    try:
+        init_data = await websocket.receive_json()
+        if init_data.get("type") == "init":
+            if init_data.get("diary_entries"):
+                try:
+                    diary_entries = json.loads(init_data["diary_entries"])
+                except:
+                    pass
+            
+            recognizer, push_stream = azure_clients.start_continuous_recognition(
+                speech_callback,
+                language=init_data.get("language", "en-US")
+            )
+            
+            await websocket.send_json({"type": "ready"})
+        
+        async def process_soap_updates():
+            nonlocal current_soap, update_buffer
+            
+            while True:
+                await asyncio.sleep(2.5)
+                
+                if update_buffer:
+                    final_chunks = [text for status, text in update_buffer if status == "final"]
+                    update_buffer = []
+                    
+                    if final_chunks:
+                        new_text = " ".join(final_chunks)
+                        try:
+                            updated_soap = await loop.run_in_executor(
+                                None,
+                                lambda: soap_pipeline.update_soap_incremental(
+                                    new_text,
+                                    current_soap,
+                                    current_transcript,
+                                    diary_entries
+                                )
+                            )
+                            current_soap = updated_soap
+                            
+                            await websocket.send_json({
+                                "type": "soap_update",
+                                "soap": updated_soap
+                            })
+                        except Exception as e:
+                            print(f"Error updating SOAP: {e}")
+        
+        update_task = asyncio.create_task(process_soap_updates())
+        running = True
+        
+        while running:
+            try:
+                data = await websocket.receive()
+                
+                if "bytes" in data:
+                    audio_chunk = data["bytes"]
+                    if push_stream:
+                        push_stream.write(audio_chunk.tobytes() if hasattr(audio_chunk, 'tobytes') else bytes(audio_chunk))
+                elif "text" in data:
+                    message = json.loads(data["text"])
+                    if message.get("type") == "stop":
+                        running = False
+                        break
+            except WebSocketDisconnect:
+                running = False
+                break
+            except Exception as e:
+                print(f"WebSocket error: {e}")
+                running = False
+                break
+        
+        update_task.cancel()
+        try:
+            await update_task
+        except asyncio.CancelledError:
+            pass
+        
+        if recognizer:
+            try:
+                recognizer.stop_continuous_recognition_async().get()
+            except:
+                pass
+        
+        if push_stream:
+            try:
+                push_stream.close()
+            except:
+                pass
+        
+        try:
+            if not current_transcript:
+                current_transcript = "No speech detected."
+            
+            final_soap = await loop.run_in_executor(
+                None,
+                lambda: soap_pipeline.generate_soap_note(current_transcript, {}, diary_entries)
+            )
+            
+            await websocket.send_json({
+                "type": "final",
+                "transcription": current_transcript,
+                "soap": final_soap
+            })
+            print(f"Final SOAP note generated and sent. Transcript length: {len(current_transcript)}")
+        except Exception as e:
+            print(f"Error generating final SOAP: {e}")
+            import traceback
+            traceback.print_exc()
+            try:
+                await websocket.send_json({
+                    "type": "final",
+                    "transcription": current_transcript or "Error occurred",
+                    "soap": current_soap
+                })
+            except:
+                pass
+        
+    except Exception as e:
+        print(f"WebSocket stream error: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except:
+            pass
 
 
 if __name__ == "__main__":

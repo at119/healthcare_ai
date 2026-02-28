@@ -233,6 +233,53 @@ class AzureClients:
         else:
             raise ValueError(f"Speech recognition failed with reason: {result.reason}")
     
+    def start_continuous_recognition(self, callback, language: str = "en-US"):
+        if not self.speech_config:
+            raise ValueError("Azure Speech service not configured")
+        
+        import io
+        import wave
+        
+        stream_format = speechsdk.audio.AudioStreamFormat(
+            samples_per_second=16000,
+            bits_per_sample=16,
+            channels=1
+        )
+        
+        push_stream = speechsdk.audio.PushAudioInputStream(stream_format=stream_format)
+        audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
+        
+        recognizer = speechsdk.SpeechRecognizer(
+            speech_config=self.speech_config,
+            audio_config=audio_config,
+            language=language
+        )
+        
+        def recognized_cb(evt):
+            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                text = evt.result.text.strip()
+                if text:
+                    callback("final", text)
+            elif evt.result.reason == speechsdk.ResultReason.NoMatch:
+                pass
+        
+        def recognizing_cb(evt):
+            if evt.result.reason == speechsdk.ResultReason.RecognizingSpeech:
+                text = evt.result.text.strip()
+                if text:
+                    callback("interim", text)
+        
+        def canceled_cb(evt):
+            callback("error", f"Recognition canceled: {evt.reason}")
+        
+        recognizer.recognized.connect(recognized_cb)
+        recognizer.recognizing.connect(recognizing_cb)
+        recognizer.canceled.connect(canceled_cb)
+        
+        recognizer.start_continuous_recognition_async()
+        
+        return recognizer, push_stream
+    
     def extract_health_entities(self, text: str) -> dict:
         if not self.text_analytics_client:
             raise ValueError("Text Analytics service not configured")

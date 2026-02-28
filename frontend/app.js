@@ -3,6 +3,17 @@ const API_BASE_URL = 'http://localhost:8000';
 let mediaRecorder = null;
 let audioChunks = [];
 let currentRecordingType = null;
+let clinicalWebSocket = null;
+let clinicalAudioContext = null;
+let clinicalMediaStream = null;
+let clinicalTranscript = "";
+let clinicalSOAP = {
+    subjective: "",
+    objective: "No objective findings documented.",
+    assessment: "",
+    plan: ""
+};
+let useStreaming = true;
 
 document.querySelectorAll('.tab-button').forEach(button => {
     button.addEventListener('click', () => {
@@ -398,13 +409,31 @@ function displayClinicalResults(result) {
     resultsDiv.innerHTML = html;
 }
 
-document.getElementById('record-btn').addEventListener('click', startRecording.bind(null, 'diary'));
-document.getElementById('stop-btn').addEventListener('click', stopRecording);
+let isDiaryRecording = false;
+let isClinicalRecording = false;
 
-document.getElementById('clinical-record-btn').addEventListener('click', startRecording.bind(null, 'clinical'));
-document.getElementById('clinical-stop-btn').addEventListener('click', stopRecording);
+document.getElementById('record-btn').addEventListener('click', () => {
+    if (isDiaryRecording) {
+        stopRecording();
+    } else {
+        startRecording('diary');
+    }
+});
+
+document.getElementById('clinical-record-btn').addEventListener('click', () => {
+    if (isClinicalRecording) {
+        stopClinicalStreaming();
+    } else {
+        startClinicalStreaming();
+    }
+});
 
 async function startRecording(type) {
+    if (type === 'clinical' && useStreaming) {
+        startClinicalStreaming();
+        return;
+    }
+    
     currentRecordingType = type;
     audioChunks = [];
     
@@ -449,15 +478,266 @@ async function startRecording(type) {
         mediaRecorder.start();
         
         const recordBtn = type === 'diary' ? document.getElementById('record-btn') : document.getElementById('clinical-record-btn');
-        const stopBtn = type === 'diary' ? document.getElementById('stop-btn') : document.getElementById('clinical-stop-btn');
         const statusSpan = type === 'diary' ? document.getElementById('recording-status') : document.getElementById('clinical-recording-status');
         
-        recordBtn.disabled = true;
-        stopBtn.disabled = false;
+        if (type === 'diary') {
+            isDiaryRecording = true;
+            recordBtn.textContent = '⏹ Stop Recording';
+            recordBtn.classList.remove('btn-primary');
+            recordBtn.classList.add('btn-secondary');
+        }
         statusSpan.textContent = '🔴 Recording...';
     } catch (error) {
         showNotification('Error accessing microphone: ' + error.message, 'error');
     }
+}
+
+async function startClinicalStreaming() {
+    try {
+        clinicalTranscript = "";
+        clinicalSOAP = {
+            subjective: "",
+            objective: "No objective findings documented.",
+            assessment: "",
+            plan: ""
+        };
+        
+        const diaryEntries = loadEntriesFromLocal();
+        const relevantEntries = diaryEntries.filter(entry => 
+            entry.entry_type === 'disease' || entry.entry_type === 'medication'
+        );
+        
+        const wsUrl = API_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://');
+        clinicalWebSocket = new WebSocket(`${wsUrl}/ws/clinical/stream`);
+        
+        clinicalWebSocket.onopen = async () => {
+            await clinicalWebSocket.send(JSON.stringify({
+                type: "init",
+                language: "en-US",
+                diary_entries: JSON.stringify(relevantEntries)
+            }));
+        };
+        
+        clinicalWebSocket.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === "ready") {
+                startAudioCapture();
+            } else if (data.type === "transcription") {
+                if (data.status === "final") {
+                    clinicalTranscript = data.full_transcript;
+                    updateLiveTranscription(data.full_transcript);
+                } else if (data.status === "interim") {
+                    updateLiveTranscription(clinicalTranscript + " " + data.text, true);
+                }
+            } else if (data.type === "soap_update") {
+                clinicalSOAP = data.soap;
+                updateLiveSOAP(data.soap);
+            } else if (data.type === "final") {
+                displayClinicalResults({
+                    transcription: data.transcription,
+                    soap_note: data.soap,
+                    health_entities: []
+                });
+                document.getElementById('live-indicator').style.display = 'none';
+                showNotification('SOAP note generated successfully!', 'success');
+            } else if (data.type === "error") {
+                showNotification(`Streaming error: ${data.message}`, 'error');
+                fallbackToBatchMode();
+            }
+        };
+        
+        clinicalWebSocket.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            showNotification('Streaming connection failed. Falling back to batch mode.', 'error');
+            fallbackToBatchMode();
+        };
+        
+        isClinicalRecording = true;
+        const recordBtn = document.getElementById('clinical-record-btn');
+        recordBtn.textContent = '⏹ Stop Recording';
+        recordBtn.classList.remove('btn-primary');
+        recordBtn.classList.add('btn-secondary');
+        document.getElementById('clinical-recording-status').textContent = '🔴 Live Streaming...';
+        document.getElementById('live-indicator').style.display = 'block';
+        document.getElementById('clinical-form').querySelector('button[type="submit"]').disabled = true;
+        
+        displayLiveResults();
+    } catch (error) {
+        console.error('Error starting streaming:', error);
+        showNotification('Failed to start streaming. Using batch mode.', 'error');
+        fallbackToBatchMode();
+    }
+}
+
+function startAudioCapture() {
+    navigator.mediaDevices.getUserMedia({
+        audio: {
+            sampleRate: 16000,
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true
+        }
+    }).then(stream => {
+        clinicalMediaStream = stream;
+        clinicalAudioContext = new (window.AudioContext || window.webkitAudioContext)({
+            sampleRate: 16000
+        });
+        
+        const source = clinicalAudioContext.createMediaStreamSource(stream);
+        const processor = clinicalAudioContext.createScriptProcessor(4096, 1, 1);
+        
+        processor.onaudioprocess = (e) => {
+            if (clinicalWebSocket && clinicalWebSocket.readyState === WebSocket.OPEN) {
+                const inputData = e.inputBuffer.getChannelData(0);
+                const pcm16 = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    const s = Math.max(-1, Math.min(1, inputData[i]));
+                    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                }
+                clinicalWebSocket.send(pcm16.buffer);
+            }
+        };
+        
+        source.connect(processor);
+        processor.connect(clinicalAudioContext.destination);
+    }).catch(error => {
+        showNotification('Error accessing microphone: ' + error.message, 'error');
+        fallbackToBatchMode();
+    });
+}
+
+function stopClinicalStreaming() {
+    isClinicalRecording = false;
+    const recordBtn = document.getElementById('clinical-record-btn');
+    recordBtn.textContent = '🎤 Start Recording';
+    recordBtn.classList.remove('btn-secondary');
+    recordBtn.classList.add('btn-primary');
+    document.getElementById('clinical-recording-status').textContent = '⏳ Processing...';
+    
+    if (clinicalMediaStream) {
+        clinicalMediaStream.getTracks().forEach(track => track.stop());
+        clinicalMediaStream = null;
+    }
+    
+    if (clinicalAudioContext) {
+        clinicalAudioContext.close();
+        clinicalAudioContext = null;
+    }
+    
+    if (clinicalWebSocket) {
+        let finalReceived = false;
+        const originalOnMessage = clinicalWebSocket.onmessage;
+        
+        clinicalWebSocket.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === "final") {
+                finalReceived = true;
+                displayClinicalResults({
+                    transcription: data.transcription,
+                    soap_note: data.soap,
+                    health_entities: []
+                });
+                document.getElementById('live-indicator').style.display = 'none';
+                document.getElementById('clinical-recording-status').textContent = '✓ Recording complete';
+                cleanupWebSocket();
+            } else if (originalOnMessage) {
+                originalOnMessage(event);
+            }
+        };
+        
+        clinicalWebSocket.send(JSON.stringify({ type: "stop" }));
+        
+        setTimeout(() => {
+            if (!finalReceived && clinicalWebSocket) {
+                console.warn('Final SOAP not received, closing connection');
+                document.getElementById('clinical-recording-status').textContent = '✓ Recording complete';
+                cleanupWebSocket();
+            }
+        }, 5000);
+    } else {
+        cleanupWebSocket();
+    }
+}
+
+function cleanupWebSocket() {
+    if (clinicalWebSocket) {
+        clinicalWebSocket.close();
+        clinicalWebSocket = null;
+    }
+    
+    document.getElementById('clinical-form').querySelector('button[type="submit"]').disabled = false;
+}
+
+function fallbackToBatchMode() {
+    useStreaming = false;
+    stopClinicalStreaming();
+    startRecording('clinical');
+    setTimeout(() => {
+        useStreaming = true;
+    }, 1000);
+}
+
+function displayLiveResults() {
+    const resultsDiv = document.getElementById('clinical-results');
+    resultsDiv.innerHTML = `
+        <div class="clinical-result">
+            <div class="soap-section">
+                <h3>Live Transcription</h3>
+                <div id="live-transcription" class="transcription-box" style="min-height: 100px;">Waiting for speech...</div>
+            </div>
+            
+            <div class="soap-section">
+                <h3>SOAP Note <span id="soap-loading" style="display: none; color: #2196f3;">⏳ Updating...</span></h3>
+                <div class="soap-note">
+                    <div class="soap-item">
+                        <h4>Subjective (S)</h4>
+                        <p id="soap-subjective">-</p>
+                    </div>
+                    <div class="soap-item">
+                        <h4>Objective (O)</h4>
+                        <p id="soap-objective">No objective findings documented.</p>
+                    </div>
+                    <div class="soap-item">
+                        <h4>Assessment (A)</h4>
+                        <p id="soap-assessment">-</p>
+                    </div>
+                    <div class="soap-item">
+                        <h4>Plan (P)</h4>
+                        <p id="soap-plan">-</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function updateLiveTranscription(text, isInterim = false) {
+    const elem = document.getElementById('live-transcription');
+    if (elem) {
+        elem.innerHTML = text + (isInterim ? ' <span style="opacity: 0.5;">...</span>' : '');
+    }
+}
+
+function updateLiveSOAP(soap) {
+    const loadingElem = document.getElementById('soap-loading');
+    if (loadingElem) {
+        loadingElem.style.display = 'inline';
+        setTimeout(() => {
+            if (loadingElem) loadingElem.style.display = 'none';
+        }, 500);
+    }
+    
+    const subjective = document.getElementById('soap-subjective');
+    const objective = document.getElementById('soap-objective');
+    const assessment = document.getElementById('soap-assessment');
+    const plan = document.getElementById('soap-plan');
+    
+    if (subjective) subjective.textContent = soap.subjective || '-';
+    if (objective) objective.textContent = soap.objective || 'No objective findings documented.';
+    if (assessment) assessment.textContent = soap.assessment || '-';
+    if (plan) plan.textContent = soap.plan || '-';
 }
 
 function stopRecording() {
@@ -466,11 +746,14 @@ function stopRecording() {
         
         const type = currentRecordingType;
         const recordBtn = type === 'diary' ? document.getElementById('record-btn') : document.getElementById('clinical-record-btn');
-        const stopBtn = type === 'diary' ? document.getElementById('stop-btn') : document.getElementById('clinical-stop-btn');
         const statusSpan = type === 'diary' ? document.getElementById('recording-status') : document.getElementById('clinical-recording-status');
         
-        recordBtn.disabled = false;
-        stopBtn.disabled = true;
+        if (type === 'diary') {
+            isDiaryRecording = false;
+            recordBtn.textContent = '🎤 Start Recording';
+            recordBtn.classList.remove('btn-secondary');
+            recordBtn.classList.add('btn-primary');
+        }
         statusSpan.textContent = '✓ Recording complete';
     }
 }

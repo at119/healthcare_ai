@@ -45,9 +45,6 @@
                                 <button type="button" id="record-btn" class="btn btn-primary">
                                     🎤 Start Recording
                                 </button>
-                                <button type="button" id="stop-btn" class="btn btn-secondary" disabled>
-                                    ⏹ Stop Recording
-                                </button>
                                 <span id="recording-status"></span>
                             </div>
                             <audio id="audio-playback" controls style="display: none; margin-top: 10px;"></audio>
@@ -97,9 +94,6 @@
                                 <button type="button" id="clinical-record-btn" class="btn btn-primary">
                                     🎤 Start Recording
                                 </button>
-                                <button type="button" id="clinical-stop-btn" class="btn btn-secondary" disabled>
-                                    ⏹ Stop Recording
-                                </button>
                                 <span id="clinical-recording-status"></span>
                             </div>
                             <audio id="clinical-audio-playback" controls style="display: none; margin-top: 10px;"></audio>
@@ -116,6 +110,9 @@
 
                 <div class="clinical-results-section">
                     <h2>Results</h2>
+                    <div id="live-indicator" style="display: none; margin-bottom: 15px; padding: 10px; background: #e3f2fd; border-left: 4px solid #2196f3; border-radius: 4px;">
+                        <strong>🎤 Live Clinical Copilot Active</strong> - Real-time transcription and SOAP generation in progress...
+                    </div>
                     <div id="clinical-results">
                         <div class="placeholder-text">Submit a voice note or text to see results</div>
                     </div>
