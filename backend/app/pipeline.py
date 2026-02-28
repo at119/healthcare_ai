@@ -298,7 +298,19 @@ Remember: Write as a clinical document. Use third person. Be concise and profess
                 if relevant_entries:
                     diary_context = "\n\n=== PATIENT HEALTH DIARY ENTRIES (MEDICAL HISTORY) ===\n" + "\n".join(relevant_entries) + "\n=== END DIARY ENTRIES ===\n"
             
-            update_prompt = f"""You are updating a clinical SOAP note incrementally. You have the current SOAP note state and a new text chunk from the patient dictation.
+            has_subjective = bool(current_soap.get('subjective', '').strip())
+            has_assessment = bool(current_soap.get('assessment', '').strip())
+            has_plan = bool(current_soap.get('plan', '').strip())
+            
+            priority_instruction = ""
+            if not has_subjective:
+                priority_instruction = "\n\nPRIORITY: Generate Subjective section FIRST. Extract the chief complaint and initial symptoms from the transcript immediately."
+            elif not has_assessment:
+                priority_instruction = "\n\nPRIORITY: Generate Assessment section next. Provide an early rough hypothesis based on current symptoms. It can be refined later."
+            elif not has_plan:
+                priority_instruction = "\n\nPRIORITY: Generate Plan section. Assessment should already exist."
+            
+            update_prompt = f"""You are updating a clinical SOAP note incrementally during live transcription. You have the current SOAP note state and transcript.
 
 Current SOAP Note State:
 Subjective: {current_soap.get('subjective', '')}
@@ -309,15 +321,22 @@ Plan: {current_soap.get('plan', '')}
 Full transcript so far: {full_transcript}
 New text chunk to incorporate: {new_text_chunk}
 {diary_context}
+{priority_instruction}
 
-Your task: Update the SOAP note by incorporating the new text chunk. Do NOT regenerate from scratch. Only update the relevant sections with the new information.
+Your task: Update the SOAP note by incorporating the new information. Follow these priorities:
+1. SUBJECTIVE must appear FIRST - extract chief complaint and symptoms immediately
+2. ASSESSMENT appears next - provide early rough hypothesis that can refine over time
+3. PLAN appears later - only after assessment is established
+4. OBJECTIVE - document only if mentioned, otherwise keep "No objective findings documented"
 
 Rules:
-1. Merge new information into existing sections
-2. Keep existing content that is still valid
-3. Update sections that are affected by the new text
-4. Maintain clinical format and third-person language
-5. Reference diary entries if relevant
+- If Subjective is empty, generate it NOW from the transcript
+- If Assessment is empty but Subjective exists, generate an early hypothesis
+- If Plan is empty but Assessment exists, generate a basic plan
+- Merge new information into existing sections
+- Keep existing content that is still valid
+- Maintain clinical format and third-person language
+- Reference diary entries if relevant
 
 Return the updated SOAP note in this exact format:
 

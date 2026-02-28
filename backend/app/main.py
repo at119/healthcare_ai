@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 import asyncio
 import threading
 from dotenv import load_dotenv
+import httpx
 
 from .azure_clients import AzureClients
 from .schemas import (
@@ -31,6 +32,8 @@ try:
 except Exception as e:
     print(f"Warning: Error loading .env file: {e}")
     load_dotenv(override=True)
+
+DOCTORS_FILE = pathlib.Path(__file__).parent / "doctors.json"
 
 from starlette.requests import Request
 from starlette.datastructures import UploadFile as StarletteUploadFile
@@ -248,12 +251,6 @@ async def transcribe_clinical_note(
         
         transcription = azure_clients.transcribe_audio(audio_bytes, language=language)
         
-        health_entities = {"entities": [], "relations": []}
-        try:
-            health_entities = azure_clients.extract_health_entities(transcription)
-        except Exception as e:
-            print(f"Health entity extraction failed: {str(e)}")
-        
         entries_list = []
         if diary_entries:
             try:
@@ -268,13 +265,12 @@ async def transcribe_clinical_note(
         else:
             print("No diary entries received in transcribe endpoint")
         
-        soap_note_dict = soap_pipeline.generate_soap_note(transcription, health_entities, entries_list)
+        soap_note_dict = soap_pipeline.generate_soap_note(transcription, None, entries_list)
         soap_note = SOAPNote(**soap_note_dict)
         
         return ClinicalNoteResponse(
             transcription=transcription,
-            soap_note=soap_note,
-            health_entities=health_entities.get("entities", [])
+            soap_note=soap_note
         )
     except HTTPException:
         raise
@@ -395,12 +391,6 @@ async def text_to_soap(text: str = Form(...), diary_entries: str = Form(None)):
             print(f"Deployment: {azure_clients.openai_deployment}")
             print(f"API Version: {azure_clients.openai_api_version}")
         
-        health_entities = {"entities": [], "relations": []}
-        try:
-            health_entities = azure_clients.extract_health_entities(text)
-        except Exception as e:
-            print(f"Health entity extraction failed: {str(e)}")
-        
         entries_list = []
         if diary_entries:
             try:
@@ -415,13 +405,12 @@ async def text_to_soap(text: str = Form(...), diary_entries: str = Form(None)):
         else:
             print("No diary entries received")
         
-        soap_note_dict = soap_pipeline.generate_soap_note(text, health_entities, entries_list)
+        soap_note_dict = soap_pipeline.generate_soap_note(text, None, entries_list)
         soap_note = SOAPNote(**soap_note_dict)
         
         return ClinicalNoteResponse(
             transcription=text,
-            soap_note=soap_note,
-            health_entities=health_entities.get("entities", [])
+            soap_note=soap_note
         )
     except Exception as e:
         print(f"ERROR in text_to_soap: {e}")
@@ -496,35 +485,48 @@ async def websocket_clinical_stream(websocket: WebSocket):
             await websocket.send_json({"type": "ready"})
         
         async def process_soap_updates():
-            nonlocal current_soap, update_buffer
+            nonlocal current_soap, update_buffer, current_transcript
+            first_update = True
             
             while True:
-                await asyncio.sleep(2.5)
+                if first_update:
+                    await asyncio.sleep(3.0)
+                    first_update = False
+                else:
+                    await asyncio.sleep(2.5)
                 
-                if update_buffer:
-                    final_chunks = [text for status, text in update_buffer if status == "final"]
-                    update_buffer = []
-                    
-                    if final_chunks:
-                        new_text = " ".join(final_chunks)
-                        try:
-                            updated_soap = await loop.run_in_executor(
-                                None,
-                                lambda: soap_pipeline.update_soap_incremental(
-                                    new_text,
-                                    current_soap,
-                                    current_transcript,
-                                    diary_entries
-                                )
+                if current_transcript and len(current_transcript.strip()) > 10:
+                    try:
+                        new_text = ""
+                        if update_buffer:
+                            final_chunks = [text for status, text in update_buffer if status == "final"]
+                            update_buffer = []
+                            new_text = " ".join(final_chunks)
+                        
+                        updated_soap = await loop.run_in_executor(
+                            None,
+                            lambda: soap_pipeline.update_soap_incremental(
+                                new_text if new_text else current_transcript,
+                                current_soap,
+                                current_transcript,
+                                diary_entries
                             )
-                            current_soap = updated_soap
-                            
-                            await websocket.send_json({
-                                "type": "soap_update",
-                                "soap": updated_soap
-                            })
-                        except Exception as e:
-                            print(f"Error updating SOAP: {e}")
+                        )
+                        
+                        changed_sections = []
+                        for section in ["subjective", "objective", "assessment", "plan"]:
+                            if updated_soap.get(section) != current_soap.get(section):
+                                changed_sections.append(section)
+                        
+                        current_soap = updated_soap
+                        
+                        await websocket.send_json({
+                            "type": "soap_update",
+                            "soap": updated_soap,
+                            "changed_sections": changed_sections
+                        })
+                    except Exception as e:
+                        print(f"Error updating SOAP: {e}")
         
         update_task = asyncio.create_task(process_soap_updates())
         running = True
@@ -550,51 +552,89 @@ async def websocket_clinical_stream(websocket: WebSocket):
                 running = False
                 break
         
+        print("Stop signal received, preparing for final SOAP generation...")
+        
         update_task.cancel()
         try:
             await update_task
         except asyncio.CancelledError:
             pass
         
+        print("Waiting for speech recognition to finalize...")
+        await asyncio.sleep(1.5)
+        
         if recognizer:
             try:
+                print("Stopping continuous recognition...")
                 recognizer.stop_continuous_recognition_async().get()
-            except:
-                pass
+                print("Recognition stopped")
+            except Exception as e:
+                print(f"Error stopping recognizer: {e}")
+        
+        await asyncio.sleep(1.0)
         
         if push_stream:
             try:
+                print("Closing audio stream...")
                 push_stream.close()
-            except:
-                pass
+                print("Audio stream closed")
+            except Exception as e:
+                print(f"Error closing stream: {e}")
+        
+        await asyncio.sleep(0.5)
         
         try:
-            if not current_transcript:
+            if not current_transcript or current_transcript.strip() == "":
                 current_transcript = "No speech detected."
+            
+            print(f"=== FINAL SOAP GENERATION ===")
+            print(f"Transcript length: {len(current_transcript)}")
+            print(f"Transcript: {current_transcript}")
+            print(f"Current incremental SOAP state: {current_soap}")
+            print(f"Diary entries: {len(diary_entries)}")
             
             final_soap = await loop.run_in_executor(
                 None,
-                lambda: soap_pipeline.generate_soap_note(current_transcript, {}, diary_entries)
+                lambda: soap_pipeline.generate_soap_note(current_transcript, None, diary_entries)
             )
+            
+            print(f"=== FINAL SOAP GENERATED ===")
+            print(f"Subjective: {final_soap.get('subjective', '')[:100]}...")
+            print(f"Assessment: {final_soap.get('assessment', '')[:100]}...")
+            print(f"Plan: {final_soap.get('plan', '')[:100]}...")
             
             await websocket.send_json({
                 "type": "final",
                 "transcription": current_transcript,
                 "soap": final_soap
             })
-            print(f"Final SOAP note generated and sent. Transcript length: {len(current_transcript)}")
+            print(f"Final SOAP note sent to client. Transcript length: {len(current_transcript)}")
         except Exception as e:
-            print(f"Error generating final SOAP: {e}")
+            print(f"ERROR generating final SOAP: {e}")
             import traceback
             traceback.print_exc()
             try:
+                print("Attempting fallback: generating fresh SOAP from transcript...")
+                final_soap = await loop.run_in_executor(
+                    None,
+                    lambda: soap_pipeline.generate_soap_note(current_transcript or "No transcript available", None, diary_entries)
+                )
                 await websocket.send_json({
                     "type": "final",
                     "transcription": current_transcript or "Error occurred",
-                    "soap": current_soap
+                    "soap": final_soap
                 })
-            except:
-                pass
+                print("Fallback SOAP sent successfully")
+            except Exception as e2:
+                print(f"ERROR in fallback: {e2}")
+                try:
+                    await websocket.send_json({
+                        "type": "final",
+                        "transcription": current_transcript or "Error occurred",
+                        "soap": current_soap
+                    })
+                except:
+                    pass
         
     except Exception as e:
         print(f"WebSocket stream error: {e}")
@@ -609,6 +649,332 @@ async def websocket_clinical_stream(websocket: WebSocket):
             await websocket.close()
         except:
             pass
+
+@app.get("/api/doctors")
+async def get_doctors(
+    specialty: str = None,
+    assessment: str = None,
+    transcription: str = None,
+    city: str = None,
+    state: str = None
+):
+    try:
+        import httpx
+        
+        default_state = os.getenv("NPI_DEFAULT_STATE", "NY")
+        default_city = os.getenv("NPI_DEFAULT_CITY", "")
+        search_limit = int(os.getenv("NPI_SEARCH_LIMIT", "10"))
+        
+        search_state = state or default_state
+        search_city = city or default_city
+        
+        combined_text = f"{(assessment or '')} {(transcription or '')}".strip()
+        print(f"[DOCTORS] Combined text: {combined_text[:200]}...")
+        print(f"[DOCTORS] Assessment: {assessment}")
+        print(f"[DOCTORS] Transcription: {transcription}")
+        
+        taxonomy_description = None
+        
+        if azure_clients.openai_client and combined_text:
+            try:
+                ai_prompt = f"""Based on the following patient symptoms and assessment, determine the most appropriate medical specialty needed. 
+
+Patient Information:
+{combined_text}
+
+Respond with ONLY the medical specialty taxonomy name that would be most appropriate. Use one of these exact taxonomy names from the NPI Registry:
+- Family Medicine
+- Internal Medicine
+- Cardiology
+- Endocrinology
+- Neurology
+- Orthopedic Surgery
+- Dermatology
+- Gastroenterology
+- Pulmonology
+- Rheumatology
+- Psychiatry
+- Pediatrics
+- Obstetrics & Gynecology
+- Emergency Medicine
+
+If the symptoms suggest multiple specialties, choose the PRIMARY specialty that would be most critical for initial evaluation.
+
+Respond with ONLY the specialty name, nothing else."""
+
+                response = azure_clients.openai_client.chat.completions.create(
+                    model=azure_clients.openai_deployment,
+                    messages=[
+                        {"role": "system", "content": "You are a medical specialty advisor. Analyze symptoms and recommend the most appropriate medical specialty."},
+                        {"role": "user", "content": ai_prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=50
+                )
+                
+                taxonomy_description = response.choices[0].message.content.strip()
+                print(f"AI recommended specialty: {taxonomy_description}")
+                
+                taxonomy_map = {
+                    "family medicine": "Family Medicine",
+                    "internal medicine": "Internal Medicine",
+                    "cardiology": "Cardiology",
+                    "endocrinology": "Endocrinology",
+                    "neurology": "Neurology",
+                    "orthopedic": "Orthopedic Surgery",
+                    "orthopedics": "Orthopedic Surgery",
+                    "dermatology": "Dermatology",
+                    "gastroenterology": "Gastroenterology",
+                    "pulmonology": "Pulmonology",
+                    "rheumatology": "Rheumatology",
+                    "psychiatry": "Psychiatry",
+                    "pediatrics": "Pediatrics",
+                    "obstetrics": "Obstetrics & Gynecology",
+                    "gynecology": "Obstetrics & Gynecology",
+                    "emergency": "Emergency Medicine"
+                }
+                
+                taxonomy_lower = taxonomy_description.lower()
+                for key, value in taxonomy_map.items():
+                    if key in taxonomy_lower:
+                        taxonomy_description = value
+                        break
+                
+            except Exception as e:
+                print(f"Error getting AI specialty recommendation: {e}")
+                taxonomy_description = None
+        
+        if not taxonomy_description:
+            combined_text_lower = combined_text.lower()
+            if any(keyword in combined_text_lower for keyword in ["heart", "cardiac", "chest", "hypertension", "blood pressure", "arrhythmia"]):
+                taxonomy_description = "Cardiology"
+            elif any(keyword in combined_text_lower for keyword in ["diabetes", "thyroid", "hormone", "metabolic", "insulin", "glucose"]):
+                taxonomy_description = "Endocrinology"
+            elif any(keyword in combined_text_lower for keyword in ["headache", "migraine", "neurological", "brain", "nerve", "seizure", "stroke"]):
+                taxonomy_description = "Neurology"
+            elif any(keyword in combined_text_lower for keyword in ["bone", "joint", "knee", "hip", "fracture", "arthritis"]):
+                taxonomy_description = "Orthopedic Surgery"
+            elif any(keyword in combined_text_lower for keyword in ["skin", "rash", "dermatitis", "acne"]):
+                taxonomy_description = "Dermatology"
+            elif any(keyword in combined_text_lower for keyword in ["stomach", "digestive", "gastro", "nausea", "vomit"]):
+                taxonomy_description = "Gastroenterology"
+            elif any(keyword in combined_text_lower for keyword in ["lung", "breathing", "asthma", "cough", "respiratory"]):
+                taxonomy_description = "Pulmonology"
+            else:
+                taxonomy_description = "Family Medicine"
+        
+        params = {
+            "version": "2.1",
+            "limit": min(search_limit * 2, 50)
+        }
+        
+        if taxonomy_description:
+            params["taxonomy_description"] = taxonomy_description
+        
+        if search_state:
+            params["state"] = search_state
+        
+        if search_city:
+            params["city"] = search_city
+        
+        npi_url = "https://npiregistry.cms.hhs.gov/api/"
+        print(f"[DOCTORS] NPI API params: {params}")
+        print(f"[DOCTORS] Using specialty: {taxonomy_description}")
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(npi_url, params=params)
+            response.raise_for_status()
+            npi_data = response.json()
+        
+        print(f"[DOCTORS] NPI API response - result_count: {npi_data.get('result_count', 0)}")
+        
+        doctors = []
+        if npi_data.get("result_count", 0) > 0:
+            all_providers = []
+            for result in npi_data.get("results", []):
+                provider = result.get("basic", {})
+                addresses = result.get("addresses", [])
+                taxonomies = result.get("taxonomies", [])
+                
+                primary_address = addresses[0] if addresses else {}
+                primary_taxonomy = taxonomies[0] if taxonomies else {}
+                
+                doctor_name = ""
+                if provider.get("organization_name"):
+                    doctor_name = provider["organization_name"]
+                else:
+                    first_name = provider.get("first_name", "")
+                    last_name = provider.get("last_name", "")
+                    doctor_name = f"{first_name} {last_name}".strip()
+                
+                if not doctor_name:
+                    continue
+                
+                address_parts = [
+                    primary_address.get("address_1", ""),
+                    primary_address.get("address_2", ""),
+                    primary_address.get("city", ""),
+                    primary_address.get("state", ""),
+                    primary_address.get("postal_code", "")
+                ]
+                full_address = ", ".join([p for p in address_parts if p])
+                
+                phone = primary_address.get("telephone_number", "Phone not available")
+                specialty_name = primary_taxonomy.get("desc", taxonomy_description or "General Practice")
+                
+                all_providers.append({
+                    "name": doctor_name,
+                    "specialty": specialty_name,
+                    "clinic": provider.get("organization_name", ""),
+                    "address": full_address or "Address not available",
+                    "phone": phone,
+                    "npi": result.get("number", ""),
+                    "raw_data": combined_text
+                })
+            
+            if azure_clients.openai_client and combined_text and len(all_providers) > 0:
+                try:
+                    providers_text = "\n".join([
+                        f"{i+1}. {p['name']} - {p['specialty']} - {p['address']}"
+                        for i, p in enumerate(all_providers[:20])
+                    ])
+                    
+                    ranking_prompt = f"""Based on the patient's symptoms and assessment, rank these doctors from most to least appropriate:
+
+Patient Symptoms/Assessment:
+{combined_text}
+
+Available Doctors:
+{providers_text}
+
+Respond with ONLY a comma-separated list of numbers (e.g., "3,1,5,2,4") representing the ranking order, where 1 is the first doctor listed, 2 is the second, etc. Return the top {search_limit} most appropriate doctors."""
+
+                    response = azure_clients.openai_client.chat.completions.create(
+                        model=azure_clients.openai_deployment,
+                        messages=[
+                            {"role": "system", "content": "You are a medical referral advisor. Rank doctors by how well they match the patient's needs."},
+                            {"role": "user", "content": ranking_prompt}
+                        ],
+                        temperature=0.3,
+                        max_tokens=100
+                    )
+                    
+                    ranking_text = response.choices[0].message.content.strip()
+                    ranked_indices = []
+                    for num in ranking_text.split(","):
+                        try:
+                            idx = int(num.strip()) - 1
+                            if 0 <= idx < len(all_providers):
+                                ranked_indices.append(idx)
+                        except:
+                            pass
+                    
+                    if ranked_indices:
+                        doctors = [all_providers[i] for i in ranked_indices if i < len(all_providers)][:search_limit]
+                        remaining = [all_providers[i] for i in range(len(all_providers)) if i not in ranked_indices]
+                        doctors.extend(remaining[:search_limit - len(doctors)])
+                    else:
+                        doctors = all_providers[:search_limit]
+                    
+                    print(f"AI ranked {len(doctors)} doctors")
+                except Exception as e:
+                    print(f"Error ranking doctors with AI: {e}")
+                    doctors = all_providers[:search_limit]
+            else:
+                doctors = all_providers[:search_limit]
+            
+            for doctor in doctors:
+                doctor.pop("raw_data", None)
+        
+        print(f"[DOCTORS] Returning {len(doctors)} doctors")
+        
+        if not doctors and taxonomy_description and taxonomy_description != "Family Medicine":
+            print(f"[DOCTORS] No doctors found for {taxonomy_description}, trying Family Medicine fallback...")
+            fallback_params = {
+                "version": "2.1",
+                "limit": min(search_limit * 2, 50),
+                "taxonomy_description": "Family Medicine"
+            }
+            if search_state:
+                fallback_params["state"] = search_state
+            if search_city:
+                fallback_params["city"] = search_city
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                fallback_response = await client.get(npi_url, params=fallback_params)
+                fallback_response.raise_for_status()
+                fallback_data = fallback_response.json()
+            
+            if fallback_data.get("result_count", 0) > 0:
+                for result in fallback_data.get("results", [])[:search_limit]:
+                    provider = result.get("basic", {})
+                    addresses = result.get("addresses", [])
+                    taxonomies = result.get("taxonomies", [])
+                    
+                    primary_address = addresses[0] if addresses else {}
+                    primary_taxonomy = taxonomies[0] if taxonomies else {}
+                    
+                    doctor_name = ""
+                    if provider.get("organization_name"):
+                        doctor_name = provider["organization_name"]
+                    else:
+                        first_name = provider.get("first_name", "")
+                        last_name = provider.get("last_name", "")
+                        doctor_name = f"{first_name} {last_name}".strip()
+                    
+                    if not doctor_name:
+                        continue
+                    
+                    address_parts = [
+                        primary_address.get("address_1", ""),
+                        primary_address.get("address_2", ""),
+                        primary_address.get("city", ""),
+                        primary_address.get("state", ""),
+                        primary_address.get("postal_code", "")
+                    ]
+                    full_address = ", ".join([p for p in address_parts if p])
+                    
+                    phone = primary_address.get("telephone_number", "Phone not available")
+                    specialty_name = primary_taxonomy.get("desc", "Family Medicine")
+                    
+                    doctors.append({
+                        "name": doctor_name,
+                        "specialty": specialty_name,
+                        "clinic": provider.get("organization_name", ""),
+                        "address": full_address or "Address not available",
+                        "phone": phone,
+                        "npi": result.get("number", "")
+                    })
+            
+            print(f"[DOCTORS] Fallback returned {len(doctors)} doctors")
+        
+        if not doctors:
+            print(f"[DOCTORS] No doctors found - result_count was {npi_data.get('result_count', 0)}")
+            return {
+                "doctors": [],
+                "message": "No doctors found in NPI Registry"
+            }
+        
+        return {
+            "doctors": doctors,
+            "total": len(doctors)
+        }
+    except httpx.HTTPError as e:
+        print(f"HTTP error calling NPI Registry: {e}")
+        return {
+            "doctors": [],
+            "message": f"Error connecting to NPI Registry: {str(e)}"
+        }
+    except Exception as e:
+        print(f"Error loading doctors from NPI Registry: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "doctors": [],
+            "message": f"Error loading doctors: {str(e)}"
+        }
+
+
 
 
 if __name__ == "__main__":

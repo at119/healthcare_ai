@@ -387,26 +387,90 @@ function displayClinicalResults(result) {
                     </div>
                 </div>
             </div>
-            
-            ${result.health_entities && result.health_entities.length > 0 ? `
-                <div class="soap-section">
-                    <h3>Extracted Health Entities</h3>
-                    <div class="entities-list">
-                        ${result.health_entities.map(entity => `
-                            <div class="entity-item">
-                                <strong>${entity.text}</strong> 
-                                <span class="entity-category">${entity.category}</span>
-                                <span class="entity-confidence">${(entity.confidence * 100).toFixed(1)}%</span>
-                            </div>
-                        `).join('')}
-                    </div>
-                </div>
-            ` : ''}
-            
         </div>
     `;
     
     resultsDiv.innerHTML = html;
+    
+    loadRecommendedDoctors(result.soap_note.assessment, result.transcription).catch(err => {
+        console.error('Doctors loading failed (non-blocking):', err);
+    });
+}
+
+async function loadRecommendedDoctors(assessment, transcription) {
+    const listDiv = document.getElementById('doctors-list');
+    if (!listDiv) {
+        console.warn('Doctors list div not found');
+        return;
+    }
+    
+    listDiv.innerHTML = '<div class="placeholder-text" style="padding: 20px; text-align: center; color: #86868b;">Loading doctors...</div>';
+    
+    try {
+        const params = new URLSearchParams();
+        if (assessment) params.append('assessment', assessment);
+        if (transcription) params.append('transcription', transcription);
+        
+        console.log('[FRONTEND] Loading doctors with:', { assessment: assessment?.substring(0, 100), transcription: transcription?.substring(0, 100) });
+        const url = `http://localhost:8000/api/doctors?${params.toString()}`;
+        console.log('[FRONTEND] Request URL:', url);
+        
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('[FRONTEND] Failed to fetch doctors:', response.status, errorText);
+            throw new Error(`Failed to fetch doctors: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        console.log('[FRONTEND] Doctors response:', data);
+        displayDoctors(data.doctors || []);
+    } catch (error) {
+        console.error('[FRONTEND] Error loading doctors:', error);
+        if (listDiv) {
+            listDiv.innerHTML = '<div class="placeholder-text" style="padding: 20px; text-align: center; color: #86868b;">Unable to load doctors</div>';
+        }
+    }
+}
+
+function displayDoctors(doctors) {
+    const listDiv = document.getElementById('doctors-list');
+    
+    if (!listDiv) return;
+    
+    if (!doctors || doctors.length === 0) {
+        listDiv.innerHTML = '<div class="placeholder-text" style="padding: 20px; text-align: center; color: #86868b;">No doctors found</div>';
+        return;
+    }
+    
+    const html = doctors.map((doctor, index) => {
+        const name = doctor.name || doctor.clinic || 'Unknown';
+        const specialty = doctor.specialty || 'General Practice';
+        const address = doctor.address || 'Address not available';
+        const phone = doctor.phone || 'Phone not available';
+        const clinic = doctor.clinic || '';
+        
+        return `
+            <div class="doctor-card" data-index="${index}" style="
+                background: #f5f5f7;
+                padding: 16px;
+                border-radius: 8px;
+                margin-bottom: 12px;
+                border: 1px solid #e5e5e7;
+                cursor: pointer;
+                transition: all 0.2s;
+            " onmouseover="this.style.background='#e8e8ed'; this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)'" onmouseout="this.style.background='#f5f5f7'; this.style.transform=''; this.style.boxShadow=''">
+                <h4 style="margin: 0 0 8px 0; color: #1d1d1f; font-size: 16px; font-weight: 600;">${name}</h4>
+                ${clinic ? `<p style="margin: 0 0 4px 0; color: #86868b; font-size: 13px;">${clinic}</p>` : ''}
+                <p style="margin: 0 0 8px 0; color: #007aff; font-size: 14px; font-weight: 500;">${specialty}</p>
+                <p style="margin: 0 0 4px 0; color: #1d1d1f; font-size: 13px;">📍 ${address}</p>
+                <p style="margin: 0; color: #1d1d1f; font-size: 13px;">📞 ${phone}</p>
+            </div>
+        `;
+    }).join('');
+    
+    listDiv.innerHTML = html;
 }
 
 let isDiaryRecording = false;
@@ -532,12 +596,11 @@ async function startClinicalStreaming() {
                 }
             } else if (data.type === "soap_update") {
                 clinicalSOAP = data.soap;
-                updateLiveSOAP(data.soap);
+                updateLiveSOAP(data.soap, data.changed_sections || []);
             } else if (data.type === "final") {
                 displayClinicalResults({
                     transcription: data.transcription,
-                    soap_note: data.soap,
-                    health_entities: []
+                    soap_note: data.soap
                 });
                 document.getElementById('live-indicator').style.display = 'none';
                 showNotification('SOAP note generated successfully!', 'success');
@@ -625,37 +688,56 @@ function stopClinicalStreaming() {
         clinicalAudioContext = null;
     }
     
-    if (clinicalWebSocket) {
+    if (clinicalWebSocket && clinicalWebSocket.readyState === WebSocket.OPEN) {
         let finalReceived = false;
         const originalOnMessage = clinicalWebSocket.onmessage;
         
-        clinicalWebSocket.onmessage = (event) => {
+        const stopHandler = (event) => {
             const data = JSON.parse(event.data);
+            console.log('Received message after stop:', data.type);
             
             if (data.type === "final") {
                 finalReceived = true;
+                console.log('Final SOAP received:', data.soap);
                 displayClinicalResults({
                     transcription: data.transcription,
-                    soap_note: data.soap,
-                    health_entities: []
+                    soap_note: data.soap
                 });
                 document.getElementById('live-indicator').style.display = 'none';
                 document.getElementById('clinical-recording-status').textContent = '✓ Recording complete';
+                clinicalWebSocket.onmessage = originalOnMessage;
                 cleanupWebSocket();
+            } else if (data.type === "soap_update") {
+                clinicalSOAP = data.soap;
+                updateLiveSOAP(data.soap, data.changed_sections || []);
+            } else if (data.type === "transcription") {
+                if (data.status === "final") {
+                    clinicalTranscript = data.full_transcript;
+                    updateLiveTranscription(data.full_transcript);
+                }
             } else if (originalOnMessage) {
                 originalOnMessage(event);
             }
         };
         
+        clinicalWebSocket.onmessage = stopHandler;
+        
+        console.log('Sending stop signal to server...');
         clinicalWebSocket.send(JSON.stringify({ type: "stop" }));
         
         setTimeout(() => {
             if (!finalReceived && clinicalWebSocket) {
-                console.warn('Final SOAP not received, closing connection');
+                console.warn('Final SOAP not received within timeout, closing connection');
                 document.getElementById('clinical-recording-status').textContent = '✓ Recording complete';
+                if (clinicalSOAP && Object.keys(clinicalSOAP).length > 0) {
+                    displayClinicalResults({
+                        transcription: clinicalTranscript || 'Recording stopped',
+                        soap_note: clinicalSOAP
+                    });
+                }
                 cleanupWebSocket();
             }
-        }, 5000);
+        }, 10000);
     } else {
         cleanupWebSocket();
     }
@@ -689,22 +771,22 @@ function displayLiveResults() {
             </div>
             
             <div class="soap-section">
-                <h3>SOAP Note <span id="soap-loading" style="display: none; color: #2196f3;">⏳ Updating...</span></h3>
+                <h3>SOAP Note</h3>
                 <div class="soap-note">
-                    <div class="soap-item">
-                        <h4>Subjective (S)</h4>
-                        <p id="soap-subjective">-</p>
+                    <div class="soap-item" id="soap-item-subjective" style="opacity: 0.6;">
+                        <h4>Subjective (S) <span class="section-status" id="status-subjective"></span></h4>
+                        <p id="soap-subjective">Generating...</p>
                     </div>
-                    <div class="soap-item">
+                    <div class="soap-item" id="soap-item-objective" style="opacity: 0.6;">
                         <h4>Objective (O)</h4>
                         <p id="soap-objective">No objective findings documented.</p>
                     </div>
-                    <div class="soap-item">
-                        <h4>Assessment (A)</h4>
+                    <div class="soap-item" id="soap-item-assessment" style="opacity: 0.6;">
+                        <h4>Assessment (A) <span class="section-status" id="status-assessment"></span></h4>
                         <p id="soap-assessment">-</p>
                     </div>
-                    <div class="soap-item">
-                        <h4>Plan (P)</h4>
+                    <div class="soap-item" id="soap-item-plan" style="opacity: 0.6;">
+                        <h4>Plan (P) <span class="section-status" id="status-plan"></span></h4>
                         <p id="soap-plan">-</p>
                     </div>
                 </div>
@@ -720,24 +802,43 @@ function updateLiveTranscription(text, isInterim = false) {
     }
 }
 
-function updateLiveSOAP(soap) {
-    const loadingElem = document.getElementById('soap-loading');
-    if (loadingElem) {
-        loadingElem.style.display = 'inline';
-        setTimeout(() => {
-            if (loadingElem) loadingElem.style.display = 'none';
-        }, 500);
-    }
+function updateLiveSOAP(soap, changedSections = []) {
+    const updateSection = (sectionId, content, defaultContent = '-', statusId = null) => {
+        const elem = document.getElementById(sectionId);
+        const container = elem ? document.getElementById(`soap-item-${sectionId.replace('soap-', '')}`) : null;
+        const statusElem = statusId ? document.getElementById(statusId) : null;
+        
+        if (elem && content && content.trim() && content !== defaultContent && content !== 'Generating...') {
+            elem.textContent = content;
+            if (container) {
+                container.style.opacity = '1';
+                if (changedSections.includes(sectionId.replace('soap-', ''))) {
+                    container.style.animation = 'fadeIn 0.3s ease-in';
+                    setTimeout(() => {
+                        container.style.animation = '';
+                    }, 300);
+                }
+            }
+            if (statusElem) {
+                statusElem.textContent = '';
+            }
+        } else if (elem && (!content || content === defaultContent || content === 'Generating...')) {
+            if (content !== 'Generating...') {
+                elem.textContent = defaultContent;
+            }
+            if (container) {
+                container.style.opacity = '0.6';
+            }
+            if (statusElem && !content) {
+                statusElem.innerHTML = '<span style="color: #2196f3; font-size: 12px;">⏳</span>';
+            }
+        }
+    };
     
-    const subjective = document.getElementById('soap-subjective');
-    const objective = document.getElementById('soap-objective');
-    const assessment = document.getElementById('soap-assessment');
-    const plan = document.getElementById('soap-plan');
-    
-    if (subjective) subjective.textContent = soap.subjective || '-';
-    if (objective) objective.textContent = soap.objective || 'No objective findings documented.';
-    if (assessment) assessment.textContent = soap.assessment || '-';
-    if (plan) plan.textContent = soap.plan || '-';
+    updateSection('soap-subjective', soap.subjective, '-', 'status-subjective');
+    updateSection('soap-objective', soap.objective, 'No objective findings documented.');
+    updateSection('soap-assessment', soap.assessment, '-', 'status-assessment');
+    updateSection('soap-plan', soap.plan, '-', 'status-plan');
 }
 
 function stopRecording() {

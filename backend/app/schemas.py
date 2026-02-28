@@ -45,15 +45,6 @@ class SOAPNote(BaseModel):
 class ClinicalNoteResponse(BaseModel):
     transcription: str
     soap_note: SOAPNote
-    health_entities: List[Dict[str, Any]]
-
-
-class HealthEntity(BaseModel):
-    text: str
-    category: str
-    confidence: float
-    offset: int
-    length: int
 
 
 class ErrorResponse(BaseModel):
