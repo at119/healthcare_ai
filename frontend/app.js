@@ -16,39 +16,73 @@ document.querySelectorAll('.tab-button').forEach(button => {
     });
 });
 
+function saveEntriesToLocal(entries) {
+    try {
+        localStorage.setItem('diary_entries', JSON.stringify(entries));
+    } catch (error) {
+        console.error('Error saving to localStorage:', error);
+        showNotification('Error saving entry to local storage', 'error');
+    }
+}
+
+function loadEntriesFromLocal() {
+    try {
+        const stored = localStorage.getItem('diary_entries');
+        return stored ? JSON.parse(stored) : [];
+    } catch (error) {
+        console.error('Error loading from localStorage:', error);
+        return [];
+    }
+}
+
 document.getElementById('diary-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     
     const entryType = document.getElementById('entry-type').value;
-    const text = document.getElementById('diary-text').value;
+    let text = document.getElementById('diary-text').value;
     const audioData = audioChunks.length > 0 ? await getAudioBase64() : null;
     
     if (!text && !audioData) {
-        showNotification('Please enter text or record audio', 'error');
+        showNotification('Please enter text or record audio.', 'error');
         return;
     }
     
     showLoading(true);
     
     try {
-        const formData = new FormData();
-        if (text) formData.append('text', text);
-        if (audioData) formData.append('audio_data', audioData);
-        formData.append('entry_type', entryType);
-        formData.append('timestamp', new Date().toISOString());
-        
-        const response = await fetch(`${API_BASE_URL}/api/diary/entry`, {
-            method: 'POST',
-            body: formData
-        });
-        
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Failed to create entry');
+        if (audioData && !text) {
+            const formData = new FormData();
+            formData.append('audio_data', audioData);
+            formData.append('language', 'en-US');
+            
+            const response = await fetch(`${API_BASE_URL}/api/clinical/transcribe`, {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Failed to transcribe audio');
+            }
+            
+            const result = await response.json();
+            text = result.transcription;
         }
         
-        const entry = await response.json();
-        showNotification('Entry created successfully!', 'success');
+        const entry = {
+            id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
+            text: text,
+            entry_type: entryType,
+            timestamp: new Date().toISOString(),
+            sentiment: analyzeSentiment(text),
+            suggestions: []
+        };
+        
+        const entries = loadEntriesFromLocal();
+        entries.push(entry);
+        saveEntriesToLocal(entries);
+        
+        showNotification('Entry saved!', 'success');
         
         document.getElementById('diary-text').value = '';
         audioChunks = [];
@@ -63,22 +97,49 @@ document.getElementById('diary-form').addEventListener('submit', async (e) => {
     }
 });
 
-async function loadDiaryEntries() {
-    try {
-        const response = await fetch(`${API_BASE_URL}/api/diary/entries`);
-        const entries = await response.json();
+let allEntries = [];
+
+function analyzeSentiment(text) {
+    const lowerText = text.toLowerCase();
+    if (lowerText.match(/\b(good|great|excellent|happy|well|better|improved|feeling good)\b/)) {
+        return 'positive';
+    } else if (lowerText.match(/\b(bad|terrible|awful|sad|pain|hurt|worse|feeling bad|unwell)\b/)) {
+        return 'negative';
+    }
+    return 'neutral';
+}
+
+function loadDiaryEntries() {
+    allEntries = loadEntriesFromLocal();
+    applyFilter();
+}
+
+function applyFilter() {
+    const filterValue = document.getElementById('entry-filter').value;
+    const entriesList = document.getElementById('entries-list');
+    
+    let filteredEntries = allEntries;
+    if (filterValue !== 'all') {
+        filteredEntries = allEntries.filter(entry => entry.entry_type === filterValue);
+    }
+    
+    if (filteredEntries.length === 0) {
+        entriesList.innerHTML = '<div class="placeholder-text">No entries found. Create your first entry above!</div>';
+        return;
+    }
+    
+    filteredEntries.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    
+    entriesList.innerHTML = filteredEntries.map(entry => {
+        const date = new Date(entry.timestamp);
+        const dateStr = date.toLocaleDateString();
+        const timeStr = date.toLocaleTimeString();
         
-        const entriesList = document.getElementById('entries-list');
-        if (entries.length === 0) {
-            entriesList.innerHTML = '<div class="placeholder-text">No entries yet. Create your first entry above!</div>';
-            return;
-        }
-        
-        entriesList.innerHTML = entries.map(entry => `
+        return `
             <div class="entry-card">
                 <div class="entry-header">
                     <span class="entry-type badge badge-${entry.entry_type}">${entry.entry_type}</span>
-                    <span class="entry-date">${new Date(entry.timestamp).toLocaleString()}</span>
+                    <span class="entry-date">${dateStr} at ${timeStr}</span>
                     <button class="btn-delete" onclick="deleteEntry('${entry.id}')">×</button>
                 </div>
                 <div class="entry-text">${entry.text}</div>
@@ -90,16 +151,89 @@ async function loadDiaryEntries() {
                     </div>
                 ` : ''}
             </div>
-        `).join('');
-    } catch (error) {
-        console.error('Error loading entries:', error);
-    }
+        `;
+    }).join('');
 }
 
-async function loadDiarySummary() {
+document.getElementById('entry-filter').addEventListener('change', applyFilter);
+
+function loadDiarySummary() {
     try {
-        const response = await fetch(`${API_BASE_URL}/api/diary/summary`);
-        const summary = await response.json();
+        const entries = loadEntriesFromLocal();
+        
+        if (entries.length === 0) {
+            document.getElementById('summary-stats').innerHTML = '<div class="placeholder-text">No entries yet. Create entries to see your health summary.</div>';
+            document.getElementById('summary-charts').innerHTML = '';
+            document.getElementById('summary-suggestions').innerHTML = '';
+            return;
+        }
+        
+        const sentiments = entries.map(entry => entry.sentiment || analyzeSentiment(entry.text));
+        const sentimentCounts = { positive: 0, negative: 0, neutral: 0 };
+        sentiments.forEach(s => sentimentCounts[s] = (sentimentCounts[s] || 0) + 1);
+        
+        const diseases = {};
+        const moods = {};
+        const foods = {};
+        const medications = {};
+        
+        entries.forEach(entry => {
+            const text = entry.text.toLowerCase();
+            
+            if (entry.entry_type === 'disease') {
+                const commonDiseases = ['diabetes', 'hypertension', 'asthma', 'arthritis', 'heart disease', 'cancer', 'thyroid', 'copd', 'depression', 'anxiety'];
+                commonDiseases.forEach(disease => {
+                    if (text.includes(disease)) {
+                        diseases[disease] = (diseases[disease] || 0) + 1;
+                    }
+                });
+            } else if (entry.entry_type === 'mood') {
+                if (text.match(/\b(happy|good|great|excellent|positive)\b/)) {
+                    moods['positive'] = (moods['positive'] || 0) + 1;
+                } else if (text.match(/\b(sad|bad|terrible|negative|down)\b/)) {
+                    moods['negative'] = (moods['negative'] || 0) + 1;
+                } else {
+                    moods['neutral'] = (moods['neutral'] || 0) + 1;
+                }
+            } else if (entry.entry_type === 'food') {
+                const commonFoods = ['breakfast', 'lunch', 'dinner', 'snack', 'water', 'coffee', 'tea'];
+                commonFoods.forEach(food => {
+                    if (text.includes(food)) {
+                        foods[food] = (foods[food] || 0) + 1;
+                    }
+                });
+            } else if (entry.entry_type === 'medication') {
+                const medWords = text.split(/\s+/).filter(w => w.length > 3);
+                medWords.forEach(word => {
+                    if (word.length > 0) {
+                        medications[word] = (medications[word] || 0) + 1;
+                    }
+                });
+            }
+        });
+        
+        const dates = entries.map(e => new Date(e.timestamp)).filter(d => !isNaN(d.getTime()));
+        const dateRange = dates.length > 0 ? {
+            start: new Date(Math.min(...dates.map(d => d.getTime()))).toISOString(),
+            end: new Date(Math.max(...dates.map(d => d.getTime()))).toISOString()
+        } : { start: new Date().toISOString(), end: new Date().toISOString() };
+        
+        const summary = {
+            total_entries: entries.length,
+            date_range: dateRange,
+            sentiment_trend: Object.entries(sentimentCounts).map(([sentiment, count]) => ({ sentiment, count })),
+            common_diseases: Object.entries(diseases).map(([disease, count]) => ({ disease, count })).sort((a, b) => b.count - a.count).slice(0, 5),
+            mood_patterns: Object.entries(moods).map(([mood, count]) => ({ mood, count })),
+            suggestions: [],
+            visualization_data: {
+                time_series: entries.map(e => ({
+                    date: e.timestamp,
+                    sentiment: e.sentiment || analyzeSentiment(e.text),
+                    type: e.entry_type
+                })),
+                sentiment_distribution: sentimentCounts
+            }
+        };
         
         const statsHtml = `
             <div class="summary-stats-grid">
@@ -112,49 +246,14 @@ async function loadDiarySummary() {
                     <div class="stat-label">Sentiment Categories</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-value">${summary.common_symptoms.length}</div>
-                    <div class="stat-label">Tracked Symptoms</div>
+                    <div class="stat-value">${summary.common_diseases ? summary.common_diseases.length : 0}</div>
+                    <div class="stat-label">Tracked Diseases</div>
                 </div>
             </div>
         `;
         document.getElementById('summary-stats').innerHTML = statsHtml;
         
-        const chartsHtml = `
-            <div id="sentiment-chart" style="margin: 20px 0;"></div>
-            <div id="symptoms-chart" style="margin: 20px 0;"></div>
-        `;
-        document.getElementById('summary-charts').innerHTML = chartsHtml;
-        
-        if (summary.sentiment_trend && summary.sentiment_trend.length > 0) {
-            const sentimentData = summary.sentiment_trend.map(s => ({
-                x: [s.sentiment],
-                y: [s.count],
-                type: 'bar',
-                name: s.sentiment,
-                marker: { color: s.sentiment === 'positive' ? 'green' : s.sentiment === 'negative' ? 'red' : 'gray' }
-            }));
-            
-            Plotly.newPlot('sentiment-chart', sentimentData, {
-                title: 'Sentiment Distribution',
-                xaxis: { title: 'Sentiment' },
-                yaxis: { title: 'Count' }
-            });
-        }
-        
-        if (summary.common_symptoms && summary.common_symptoms.length > 0) {
-            const symptomsData = [{
-                x: summary.common_symptoms.map(s => s.symptom),
-                y: summary.common_symptoms.map(s => s.count),
-                type: 'bar',
-                marker: { color: 'steelblue' }
-            }];
-            
-            Plotly.newPlot('symptoms-chart', symptomsData, {
-                title: 'Common Symptoms',
-                xaxis: { title: 'Symptom' },
-                yaxis: { title: 'Frequency' }
-            });
-        }
+        document.getElementById('summary-charts').innerHTML = '';
         
         if (summary.suggestions && summary.suggestions.length > 0) {
             const suggestionsHtml = `
@@ -170,19 +269,17 @@ async function loadDiarySummary() {
     }
 }
 
-async function deleteEntry(entryId) {
+function deleteEntry(entryId) {
     if (!confirm('Are you sure you want to delete this entry?')) return;
     
     try {
-        const response = await fetch(`${API_BASE_URL}/api/diary/entries/${entryId}`, {
-            method: 'DELETE'
-        });
+        const entries = loadEntriesFromLocal();
+        const filteredEntries = entries.filter(entry => entry.id !== entryId);
+        saveEntriesToLocal(filteredEntries);
         
-        if (response.ok) {
-            showNotification('Entry deleted', 'success');
-            loadDiaryEntries();
-            loadDiarySummary();
-        }
+        showNotification('Entry deleted', 'success');
+        loadDiaryEntries();
+        loadDiarySummary();
     } catch (error) {
         showNotification(`Error deleting entry: ${error.message}`, 'error');
     }
@@ -199,13 +296,18 @@ document.getElementById('clinical-form').addEventListener('submit', async (e) =>
     const audioData = audioChunks.length > 0 && currentRecordingType === 'clinical' ? await getAudioBase64() : null;
     
     if (!text && !audioData) {
-        showNotification('Please enter text or record audio', 'error');
+        showNotification('Please enter text or record audio.', 'error');
         return;
     }
     
     showLoading(true);
     
     try {
+        const diaryEntries = loadEntriesFromLocal();
+        const relevantEntries = diaryEntries.filter(entry => 
+            entry.entry_type === 'disease' || entry.entry_type === 'medication'
+        );
+        
         const formData = new FormData();
         if (audioData) {
             formData.append('audio_data', audioData);
@@ -213,6 +315,7 @@ document.getElementById('clinical-form').addEventListener('submit', async (e) =>
         } else {
             formData.append('text', text);
         }
+        formData.append('diary_entries', JSON.stringify(relevantEntries));
         
         const endpoint = audioData 
             ? `${API_BASE_URL}/api/clinical/transcribe`

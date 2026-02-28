@@ -27,10 +27,10 @@
                         <div class="form-group">
                             <label for="entry-type">Entry Type:</label>
                             <select id="entry-type" required>
-                                <option value="symptom">Symptom</option>
                                 <option value="food">Food</option>
                                 <option value="mood">Mood</option>
-                                <option value="general">General</option>
+                                <option value="disease">Disease/Genetic Illness</option>
+                                <option value="medication">Medication</option>
                             </select>
                         </div>
 
@@ -59,6 +59,16 @@
 
                 <div class="diary-entries-section">
                     <h2>Your Entries</h2>
+                    <div class="filter-controls">
+                        <label for="entry-filter">Filter by:</label>
+                        <select id="entry-filter">
+                            <option value="all">All Entries</option>
+                            <option value="food">Food</option>
+                            <option value="mood">Mood</option>
+                            <option value="disease">Disease/Illness</option>
+                            <option value="medication">Medication</option>
+                        </select>
+                    </div>
                     <div id="entries-list"></div>
                 </div>
 

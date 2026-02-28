@@ -1,4 +1,5 @@
 import os
+import json
 import uuid
 from datetime import datetime
 from typing import List, Dict, Any
@@ -234,7 +235,8 @@ async def delete_diary_entry(entry_id: str):
 @app.post("/api/clinical/transcribe", response_model=ClinicalNoteResponse)
 async def transcribe_clinical_note(
     audio_data: str = Form(...),
-    language: str = Form("en-US")
+    language: str = Form("en-US"),
+    diary_entries: str = Form(None)
 ):
     try:
         audio_bytes = decode_audio_base64(audio_data)
@@ -250,7 +252,21 @@ async def transcribe_clinical_note(
         except Exception as e:
             print(f"Health entity extraction failed: {str(e)}")
         
-        soap_note_dict = soap_pipeline.generate_soap_note(transcription, health_entities)
+        entries_list = []
+        if diary_entries:
+            try:
+                entries_list = json.loads(diary_entries)
+                print(f"Received {len(entries_list)} diary entries for context in transcribe endpoint")
+                for entry in entries_list:
+                    print(f"  Entry: {entry.get('entry_type')} - {entry.get('text')}")
+            except Exception as e:
+                print(f"Error parsing diary entries in transcribe: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print("No diary entries received in transcribe endpoint")
+        
+        soap_note_dict = soap_pipeline.generate_soap_note(transcription, health_entities, entries_list)
         soap_note = SOAPNote(**soap_note_dict)
         
         return ClinicalNoteResponse(
@@ -366,7 +382,7 @@ async def test_openai():
 
 
 @app.post("/api/clinical/text-to-soap", response_model=ClinicalNoteResponse)
-async def text_to_soap(text: str = Form(...)):
+async def text_to_soap(text: str = Form(...), diary_entries: str = Form(None)):
     try:
         print(f"\n=== SOAP Generation Request ===")
         print(f"OpenAI client check: {azure_clients.openai_client is not None}")
@@ -383,7 +399,21 @@ async def text_to_soap(text: str = Form(...)):
         except Exception as e:
             print(f"Health entity extraction failed: {str(e)}")
         
-        soap_note_dict = soap_pipeline.generate_soap_note(text, health_entities)
+        entries_list = []
+        if diary_entries:
+            try:
+                entries_list = json.loads(diary_entries)
+                print(f"Received {len(entries_list)} diary entries for context")
+                for entry in entries_list:
+                    print(f"  Entry: {entry.get('entry_type')} - {entry.get('text')}")
+            except Exception as e:
+                print(f"Error parsing diary entries: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print("No diary entries received")
+        
+        soap_note_dict = soap_pipeline.generate_soap_note(text, health_entities, entries_list)
         soap_note = SOAPNote(**soap_note_dict)
         
         return ClinicalNoteResponse(

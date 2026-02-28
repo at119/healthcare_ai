@@ -44,15 +44,15 @@ class DiaryPipeline:
         dates = [entry.get("timestamp", datetime.now()) for entry in entries]
         sentiments = [entry.get("sentiment", "neutral") for entry in entries]
         
-        symptoms = {}
+        diseases = {}
         moods = {}
         for entry in entries:
-            if entry.get("entry_type") == "symptom":
+            if entry.get("entry_type") == "disease":
                 text = entry.get("text", "").lower()
-                common_symptoms = ["headache", "pain", "fever", "nausea", "fatigue", "cough", "sore throat"]
-                for symptom in common_symptoms:
-                    if symptom in text:
-                        symptoms[symptom] = symptoms.get(symptom, 0) + 1
+                common_diseases = ["diabetes", "hypertension", "asthma", "arthritis", "heart disease", "cancer", "thyroid", "copd", "depression", "anxiety"]
+                for disease in common_diseases:
+                    if disease in text:
+                        diseases[disease] = diseases.get(disease, 0) + 1
             
             if entry.get("entry_type") == "mood":
                 mood_text = entry.get("text", "").lower()
@@ -74,7 +74,7 @@ class DiaryPipeline:
             time_series.append({
                 "date": entry.get("timestamp", datetime.now()).isoformat(),
                 "sentiment": entry.get("sentiment", "neutral"),
-                "type": entry.get("entry_type", "general")
+                "type": entry.get("entry_type", "food")
             })
         
         return {
@@ -86,8 +86,8 @@ class DiaryPipeline:
             "sentiment_trend": [
                 {"sentiment": k, "count": v} for k, v in sentiment_counts.items()
             ],
-            "common_symptoms": [
-                {"symptom": k, "count": v} for k, v in sorted(symptoms.items(), key=lambda x: x[1], reverse=True)[:5]
+            "common_diseases": [
+                {"disease": k, "count": v} for k, v in sorted(diseases.items(), key=lambda x: x[1], reverse=True)[:5]
             ],
             "mood_patterns": [
                 {"mood": k, "count": v} for k, v in moods.items()
@@ -136,7 +136,7 @@ class SOAPPipeline:
     def __init__(self, azure_clients: AzureClients):
         self.azure_clients = azure_clients
     
-    def generate_soap_note(self, transcription: str, health_entities: Optional[Dict] = None) -> Dict[str, str]:
+    def generate_soap_note(self, transcription: str, health_entities: Optional[Dict] = None, diary_entries: Optional[List[Dict]] = None) -> Dict[str, str]:
         if not self.azure_clients.openai_client:
             print("WARNING: OpenAI client not available, using fallback SOAP generation")
             return self._generate_fallback_soap(transcription, health_entities)
@@ -150,6 +150,23 @@ class SOAPPipeline:
                     entities_list.append(f"- {e['text']} (Category: {e['category']}, Confidence: {e['confidence']:.2f})")
                 entities_context = "\n\nExtracted Medical Entities from Text Analytics:\n" + "\n".join(entities_list)
                 context += entities_context
+            
+            diary_context = ""
+            if diary_entries and len(diary_entries) > 0:
+                relevant_entries = []
+                for entry in diary_entries:
+                    if entry.get("entry_type") in ["disease", "medication"]:
+                        entry_date = entry.get("timestamp", "")
+                        entry_text = entry.get("text", "")
+                        entry_type = entry.get("entry_type", "")
+                        relevant_entries.append(f"- {entry_type.upper()}: {entry_text} (Logged: {entry_date})")
+                
+                if relevant_entries:
+                    diary_context = "\n\n=== PATIENT HEALTH DIARY ENTRIES (MEDICAL HISTORY) ===\n" + "\n".join(relevant_entries) + "\n=== END DIARY ENTRIES ===\n"
+                    context += diary_context
+                    print(f"Including {len(relevant_entries)} diary entries in SOAP context:")
+                    for entry in relevant_entries:
+                        print(f"  - {entry}")
             
             system_prompt = """You are a clinical documentation assistant. Your role is to create professional SOAP notes in standard clinical format.
 
@@ -172,20 +189,28 @@ CRITICAL RULES:
 ===PLAN===
 [Content here]"""
 
-            user_prompt = f"""Create a clinical SOAP note from this patient dictation. Write as a professional medical document. ONLY use information actually mentioned. Do not add details that weren't provided.
+            diary_instruction = ""
+            if diary_context:
+                diary_instruction = "\n\nCRITICAL: The patient has logged health diary entries above showing their medical history. You MUST reference these entries in your SOAP note:\n\n1. SUBJECTIVE section: Include ALL diseases/conditions and medications from diary entries in the medical history. For example: 'Past medical history: Diabetes type 3 (per patient diary). Current medications: [list from diary].'\n\n2. ASSESSMENT section: You MUST consider existing conditions from diary when making diagnoses. If patient has diabetes type 3, this significantly affects assessment. State: 'Primary: [diagnosis]. Patient's history of [disease from diary] is relevant as [explanation].'\n\n3. PLAN section: Account for existing medications and conditions. Check for interactions, contraindications, or necessary adjustments based on diary entries.\n\nDO NOT ignore diary entries. They are part of the patient's documented medical history and must be included."
+            
+            user_prompt = f"""Create a clinical SOAP note from this patient dictation. Write as a professional medical document.
 
 Patient dictation:
 {context}
+{diary_instruction}
+
+IMPORTANT: The diary entries shown above are PART OF THE PATIENT'S MEDICAL RECORD. You MUST include them in your SOAP note. They are not optional - they are documented medical history.
 
 Generate a SOAP note in clinical format:
 
 ===SUBJECTIVE===
-Document only what the patient reported:
+Document what the patient reported AND their medical history from diary entries:
 - Chief complaint in patient's words
-- History of present illness: symptoms, timing, severity, location (ONLY if mentioned)
-- Relevant medical history, medications, allergies (ONLY if mentioned)
+- History of present illness: symptoms, timing, severity, location (from dictation)
+- Past medical history: MUST include ALL diseases/conditions from diary entries (e.g., "Past medical history: Diabetes type 3 per patient diary")
+- Current medications: MUST include ALL medications from diary entries
 - Write in third person, concise clinical language
-- Example: "Patient reports [symptom] for [duration if mentioned]. Denies [if mentioned]."
+- Example: "Patient reports [symptom]. Past medical history: [list ALL diseases from diary]. Current medications: [list ALL medications from diary]. Denies [if mentioned]."
 
 ===OBJECTIVE===
 Document only measurable or observable findings:
@@ -198,16 +223,19 @@ Document only measurable or observable findings:
 
 ===ASSESSMENT===
 Provide differential diagnoses with clinical reasoning:
-- Most likely diagnosis based on symptom pattern
+- Most likely diagnosis based on symptom pattern AND existing conditions from diary
 - 2-4 differential diagnoses ranked by likelihood
 - Brief clinical reasoning for each
+- MANDATORY: You MUST reference diseases/conditions from diary entries in your assessment
+- If patient has diabetes type 3 in diary, you MUST state how this affects the current presentation
+- Example: "Primary: Hyperglycemia. Patient's documented history of Diabetes type 3 (per diary) is highly relevant as this condition directly relates to blood sugar dysregulation. The headache may be secondary to hyperglycemia given this history."
 - Use medical terminology and standard diagnostic criteria
 - Format as concise clinical text, not long paragraphs
-- Example: "Primary: [Diagnosis]. Differential includes: [Diagnosis 2], [Diagnosis 3]. Reasoning: [brief explanation]."
 
 ===PLAN===
 Document clear clinical management steps:
 - Medications with dosages if appropriate
+- Consider existing medications from diary entries - check for interactions or adjustments needed
 - Diagnostic tests to order
 - Follow-up recommendations
 - Patient education points
@@ -220,7 +248,7 @@ Document clear clinical management steps:
 3. Follow-up in [timeframe]
 4. [Additional step]
 
-Remember: Write as a clinical document. Use third person. Be concise and professional. Only use information actually mentioned."""
+Remember: Write as a clinical document. Use third person. Be concise and professional. Reference diary entries for medical history, existing conditions, and medications."""
 
             print(f"Calling Azure OpenAI with transcription: {transcription[:100]}...")
             print(f"OpenAI client available: {self.azure_clients.openai_client is not None}")
@@ -243,7 +271,7 @@ Remember: Write as a clinical document. Use third person. Be concise and profess
             
             if not soap_note.get("assessment") or "pending" in soap_note.get("assessment", "").lower() or "to be" in soap_note.get("assessment", "").lower():
                 print("WARNING: AI generated placeholder text, trying again with more explicit instructions")
-                return self._retry_soap_generation(transcription, health_entities)
+                return self._retry_soap_generation(transcription, health_entities, diary_entries)
             
             return soap_note
         except Exception as e:
@@ -372,14 +400,26 @@ Remember: Write as a clinical document. Use third person. Be concise and profess
             "plan": plan
         }
     
-    def _retry_soap_generation(self, transcription: str, health_entities: Optional[Dict] = None) -> Dict[str, str]:
+    def _retry_soap_generation(self, transcription: str, health_entities: Optional[Dict] = None, diary_entries: Optional[List[Dict]] = None) -> Dict[str, str]:
         try:
             context = transcription
             if health_entities and health_entities.get("entities"):
                 entities_text = ", ".join([e['text'] for e in health_entities["entities"][:10]])
                 context += f"\n\nMedical entities found: {entities_text}"
             
-            retry_prompt = f"""Create a clinical SOAP note from this patient dictation. Write as a professional medical document in third person. Do not use "you" or conversational language.
+            if diary_entries and len(diary_entries) > 0:
+                relevant_entries = []
+                for entry in diary_entries:
+                    if entry.get("entry_type") in ["disease", "medication"]:
+                        entry_date = entry.get("timestamp", "")
+                        entry_text = entry.get("text", "")
+                        entry_type = entry.get("entry_type", "")
+                        relevant_entries.append(f"- {entry_type.upper()}: {entry_text} (Logged: {entry_date})")
+                
+                if relevant_entries:
+                    context += "\n\nPatient Health Diary Entries (RELEVANT MEDICAL HISTORY):\n" + "\n".join(relevant_entries)
+            
+            retry_prompt = f"""Create a clinical SOAP note from this patient dictation. Write as a professional medical document in third person. Do not use "you" or conversational language. Reference any diseases/medications from diary entries in your assessment and plan.
 
 Patient dictation: {context}
 
